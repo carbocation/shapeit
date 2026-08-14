@@ -37,7 +37,7 @@ public:
 	bitmatrix();
 	~bitmatrix();
 
-	int subset(bitmatrix & BM, std::vector < unsigned int > rows, unsigned int col_from, unsigned int col_to);
+	int subset(bitmatrix & BM, const std::vector < unsigned int > & rows, unsigned int col_from, unsigned int col_to);
 	//void getMatchHetCount(unsigned int i0, unsigned int i1, unsigned int start, unsigned int stop, int & c1, int & m1);
 	//void getMatchHetCount_seq(unsigned int i0, unsigned int i1, unsigned int start, unsigned int stop, int & c1, int & m1);
 	float getMatchHets(unsigned int i0, unsigned int i1, unsigned int start, unsigned int stop);
@@ -50,6 +50,28 @@ public:
 
 	void transpose(bitmatrix & BM, unsigned int _max_row, unsigned int _max_col);
 	void transpose(bitmatrix & BM);
+};
+
+class bitmatrix_allele_cursor {
+private:
+	const unsigned char * next_byte;
+	unsigned char current_byte;
+	unsigned char remaining;
+
+public:
+	explicit bitmatrix_allele_cursor(const unsigned char * bytes) :
+		next_byte(bytes), current_byte(0), remaining(0) {}
+
+	inline unsigned char next() {
+		if (remaining == 0) {
+			current_byte = *next_byte++;
+			remaining = 8;
+		}
+		unsigned char value = current_byte >> 7;
+		current_byte <<= 1;
+		remaining--;
+		return value;
+	}
 };
 
 inline

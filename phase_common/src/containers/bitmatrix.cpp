@@ -38,7 +38,7 @@ bitmatrix::~bitmatrix() {
 	if (bytes != NULL) free(bytes);
 }
 
-int bitmatrix::subset(bitmatrix & BM, vector < unsigned int > rows, unsigned int col_from, unsigned int col_to) {
+int bitmatrix::subset(bitmatrix & BM, const vector < unsigned int > & rows, unsigned int col_from, unsigned int col_to) {
 	//n_rows = rows.size() + ((rows.size()%8)?(8-(rows.size()%8)):0);
 	n_rows = ROUND8(rows.size());
 	//std::cout << n_rows << " " << rows.size() << " " << col_from << " " << col_to << std::endl;

@@ -122,12 +122,17 @@ public:
 inline
 void haplotype_segment_double::INIT_HOM() {
 	bool ag = VAR_GET_HAP0(MOD2(curr_abs_locus), G->Variants[DIV2(curr_abs_locus)]);
+	bitmatrix_allele_cursor alleles(Hvar.bytes +
+		static_cast<unsigned long>(curr_rel_locus + curr_rel_locus_offset) * (Hvar.n_cols >> 3));
+	__m256d _emission[2];
+	_emission[0] = _mm256_set1_pd(1.0);
+	_emission[1] = _mm256_set1_pd(M.ed/M.ee);
 	__m256d _sum0 = _mm256_set1_pd(0.0f);
 	__m256d _sum1 = _mm256_set1_pd(0.0f);
 	for(int k = 0, i = 0 ; k != n_cond_haps ; ++k, i += HAP_NUMBER) {
-		bool ah = Hvar.get(curr_rel_locus+curr_rel_locus_offset, k);
-		__m256d _prob0 = _mm256_set1_pd((ag==ah)?1.0f:M.ed/M.ee);
-		__m256d _prob1 = _mm256_set1_pd((ag==ah)?1.0f:M.ed/M.ee);
+		bool ah = alleles.next();
+		__m256d _prob0 = _emission[ag!=ah];
+		__m256d _prob1 = _prob0;
 		_sum0 = _mm256_add_pd(_sum0, _prob0);
 		_sum1 = _mm256_add_pd(_sum1, _prob1);
 		_mm256_store_pd(&prob[i+0], _prob0);
@@ -151,16 +156,20 @@ bool haplotype_segment_double::RUN_HOM(char rare_allele) {
 		_tFreq1 = _mm256_mul_pd(_tFreq1, _factor);
 		__m256d _nt = _mm256_set1_pd(nt / probSumT);
 		__m256d _mismatch = _mm256_set1_pd(M.ed/M.ee);
+		//Avoid an unpredictable branch on the conditioning haplotype allele.
+		__m256d _emission[2];
+		_emission[0] = _mm256_set1_pd(1.0);
+		_emission[1] = _mismatch;
+		bitmatrix_allele_cursor alleles(Hvar.bytes +
+			static_cast<unsigned long>(curr_rel_locus + curr_rel_locus_offset) * (Hvar.n_cols >> 3));
 		for(int k = 0, i = 0 ; k != n_cond_haps ; ++k, i += HAP_NUMBER) {
-			bool ah = Hvar.get(curr_rel_locus+curr_rel_locus_offset, k);
+			bool ah = alleles.next();
 			__m256d _prob0 = _mm256_load_pd(&prob[i]);
 			__m256d _prob1 = _mm256_load_pd(&prob[i+4]);
 			_prob0 = _mm256_fmadd_pd(_prob0, _nt, _tFreq0);
 			_prob1 = _mm256_fmadd_pd(_prob1, _nt, _tFreq1);
-			if (ag!=ah) {
-				_prob0 = _mm256_mul_pd(_prob0, _mismatch);
-				_prob1 = _mm256_mul_pd(_prob1, _mismatch);
-			}
+			_prob0 = _mm256_mul_pd(_prob0, _emission[ag!=ah]);
+			_prob1 = _mm256_mul_pd(_prob1, _emission[ag!=ah]);
 			_sum0 = _mm256_add_pd(_sum0, _prob0);
 			_sum1 = _mm256_add_pd(_sum1, _prob1);
 			_mm256_store_pd(&prob[i], _prob0);
@@ -182,16 +191,20 @@ void haplotype_segment_double::COLLAPSE_HOM() {
 	__m256d _tFreq = _mm256_set1_pd(yt / n_cond_haps);					//Check divide by probSumT here!
 	__m256d _nt = _mm256_set1_pd(nt / probSumT);
 	__m256d _mismatch = _mm256_set1_pd(M.ed/M.ee);
+	//Avoid an unpredictable branch on the conditioning haplotype allele.
+	__m256d _emission[2];
+	_emission[0] = _mm256_set1_pd(1.0);
+	_emission[1] = _mismatch;
+	bitmatrix_allele_cursor alleles(Hvar.bytes +
+		static_cast<unsigned long>(curr_rel_locus + curr_rel_locus_offset) * (Hvar.n_cols >> 3));
 	for(int k = 0, i = 0 ; k != n_cond_haps ; ++k, i += HAP_NUMBER) {
-		bool ah = Hvar.get(curr_rel_locus+curr_rel_locus_offset, k);
+		bool ah = alleles.next();
 		__m256d _prob0 = _mm256_set1_pd(probSumK[k]);
 		__m256d _prob1 = _mm256_set1_pd(probSumK[k]);
 		_prob0 = _mm256_fmadd_pd(_prob0, _nt, _tFreq);
 		_prob1 = _mm256_fmadd_pd(_prob1, _nt, _tFreq);
-		if (ag!=ah) {
-			_prob0 = _mm256_mul_pd(_prob0, _mismatch);
-			_prob1 = _mm256_mul_pd(_prob1, _mismatch);
-		}
+		_prob0 = _mm256_mul_pd(_prob0, _emission[ag!=ah]);
+		_prob1 = _mm256_mul_pd(_prob1, _emission[ag!=ah]);
 		_sum0 = _mm256_add_pd(_sum0, _prob0);
 		_sum1 = _mm256_add_pd(_sum1, _prob1);
 		_mm256_store_pd(&prob[i], _prob0);
@@ -220,8 +233,10 @@ void haplotype_segment_double::INIT_AMB() {
 	_emit0[1] = _mm256_loadu_pd(&g1[0]);
 	_emit1[0] = _mm256_loadu_pd(&g0[4]);
 	_emit1[1] = _mm256_loadu_pd(&g1[4]);
+	bitmatrix_allele_cursor alleles(Hvar.bytes +
+		static_cast<unsigned long>(curr_rel_locus + curr_rel_locus_offset) * (Hvar.n_cols >> 3));
 	for(int k = 0, i = 0 ; k != n_cond_haps ; ++k, i += HAP_NUMBER) {
-		bool ah = Hvar.get(curr_rel_locus+curr_rel_locus_offset, k);
+		bool ah = alleles.next();
 		__m256d _prob0 = _emit0[ah];
 		__m256d _prob1 = _emit1[ah];
 		_sum0 = _mm256_add_pd(_sum0, _prob0);
@@ -254,8 +269,10 @@ void haplotype_segment_double::RUN_AMB() {
 	_emit0[1] = _mm256_loadu_pd(&g1[0]);
 	_emit1[0] = _mm256_loadu_pd(&g0[4]);
 	_emit1[1] = _mm256_loadu_pd(&g1[4]);
+	bitmatrix_allele_cursor alleles(Hvar.bytes +
+		static_cast<unsigned long>(curr_rel_locus + curr_rel_locus_offset) * (Hvar.n_cols >> 3));
 	for(int k = 0, i = 0 ; k != n_cond_haps ; ++k, i += HAP_NUMBER) {
-		bool ah = Hvar.get(curr_rel_locus+curr_rel_locus_offset, k);
+		bool ah = alleles.next();
 		__m256d _prob0 = _mm256_load_pd(&prob[i+0]);
 		__m256d _prob1 = _mm256_load_pd(&prob[i+4]);
 		_prob0 = _mm256_fmadd_pd(_prob0, _nt, _tFreq0);
@@ -288,8 +305,10 @@ void haplotype_segment_double::COLLAPSE_AMB() {
 	_emit0[1] = _mm256_loadu_pd(&g1[0]);
 	_emit1[0] = _mm256_loadu_pd(&g0[4]);
 	_emit1[1] = _mm256_loadu_pd(&g1[4]);
+	bitmatrix_allele_cursor alleles(Hvar.bytes +
+		static_cast<unsigned long>(curr_rel_locus + curr_rel_locus_offset) * (Hvar.n_cols >> 3));
 	for(int k = 0, i = 0 ; k != n_cond_haps ; ++k, i += HAP_NUMBER) {
-		bool ah = Hvar.get(curr_rel_locus+curr_rel_locus_offset, k);
+		bool ah = alleles.next();
 		__m256d _prob0 = _mm256_set1_pd(probSumK[k]);
 		__m256d _prob1 = _mm256_set1_pd(probSumK[k]);
 		_prob0 = _mm256_fmadd_pd(_prob0, _nt, _tFreq);
@@ -458,8 +477,10 @@ void haplotype_segment_double::IMPUTE(std::vector < float > & missing_probabilit
 	_alphaSum0 = _mm256_div_pd(_ones, _alphaSum0);
 	_alphaSum1 = _mm256_div_pd(_ones, _alphaSum1);
 
+	bitmatrix_allele_cursor alleles(Hvar.bytes +
+		static_cast<unsigned long>(curr_rel_locus + curr_rel_locus_offset) * (Hvar.n_cols >> 3));
 	for(int k = 0, i = 0 ; k != n_cond_haps ; ++k, i += HAP_NUMBER) {
-		bool ah = Hvar.get(curr_rel_locus+curr_rel_locus_offset, k);
+		bool ah = alleles.next();
 		__m256d _prob0 = _mm256_load_pd(&prob[i]);
 		__m256d _prob1 = _mm256_load_pd(&prob[i+4]);
 

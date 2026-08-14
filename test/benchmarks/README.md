@@ -103,6 +103,22 @@ are short. A deliberately controlled performance job can add, for example,
 Use `--seed N` for replicate scientific comparisons; recorded exact hashes are
 checked only for the default seed.
 
+For performance work, use alternating repeated runs instead of interpreting a
+single short timing:
+
+```sh
+python3 test/benchmarks/perf_compare.py \
+  --baseline-bin-dir /path/to/baseline/shapeit5 \
+  --bin-dir /path/to/candidate/shapeit5 \
+  --case common-unrelated \
+  --case common-scaffolded \
+  --repeat 7
+```
+
+The runner reverses baseline/candidate order on alternate repetitions,
+requires scientific equivalence each time, reports whether every result was
+exact, and records the individual timings and median runtime ratio in JSON.
+
 ## Comparator tests
 
 The standard-library-only tests exercise exact matches, global haplotype flips,
