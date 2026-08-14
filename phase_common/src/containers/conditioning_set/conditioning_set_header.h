@@ -51,6 +51,7 @@ public:
 
 	//SOLVER DATA
 	std::vector < float > scoreBit;
+	std::vector < std::vector < unsigned char > > solve_buffers;
 
 	//MULTI-THREADING
 	int i_worker, i_job, d_job;
@@ -68,7 +69,7 @@ public:
 	//STATES PROCESSING
 	void store(int l, std::vector < int > & A, std::vector < int > & C);
 	void select(int chunk);
-	void select();
+	void select(uint32_t);
 	void transposePBWTneighbours();
 
 	//PBWT PHASING SWEEP

@@ -41,7 +41,7 @@ void genotype_set::includeFamily(int n_twins, int n_obs_fam, int n_obs_fam_off, 
 	vrb.title("Simulate phased family samples");
 	std::vector < int > O;
 	for (int h = 0 ; h < H.n_hap ; h ++) O.push_back(h);
-	random_shuffle(O.begin(), O.end());
+	rng.shuffle(O.begin(), O.end());
 
 	//twins
 	for (int n = 0 ; n < n_twins ; n ++) {

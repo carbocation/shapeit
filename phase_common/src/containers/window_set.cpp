@@ -40,7 +40,7 @@ int window_set::size() {
 	return W.size();
 }
 
-bool window_set::split(double min_length_cm, int left_index, int right_index, vector < int > & idx_sta, vector < int > & idx_sto, vector < double > & ccm_sta, vector < double > & ccm_sto, vector < int > & output) {
+bool window_set::split(double min_length_cm, int left_index, int right_index, vector < int > & idx_sta, vector < int > & idx_sto, vector < double > & ccm_sta, vector < double > & ccm_sto, vector < int > & output, random_number_generator & job_rng) {
 	int number_of_segments = right_index-left_index+1;
 	int number_of_variants = idx_sto[right_index] - idx_sta[left_index] + 1;
 	double length_of_region = ccm_sto[right_index] - ccm_sta[left_index];
@@ -48,10 +48,10 @@ bool window_set::split(double min_length_cm, int left_index, int right_index, ve
 	//A phasing window must (i) span >=4 segments, (ii) contain >= 100 variants and (iii) span more than "min_length_cm" cM
 	if (number_of_segments < 4 || number_of_variants < 100 || length_of_region < min_length_cm) return false;
 	else {
-		int split_point = rng.getInt(number_of_segments/2) + number_of_segments/4 + 1;
+		int split_point = job_rng.getInt(number_of_segments/2) + number_of_segments/4 + 1;
 		vector <  int > left_output, right_output;
-		bool ret1 = split(min_length_cm, left_index, left_index + split_point, idx_sta, idx_sto, ccm_sta, ccm_sto, left_output);
-		bool ret2 = split(min_length_cm, left_index + split_point, right_index, idx_sta, idx_sto, ccm_sta, ccm_sto, right_output);
+		bool ret1 = split(min_length_cm, left_index, left_index + split_point, idx_sta, idx_sto, ccm_sta, ccm_sto, left_output, job_rng);
+		bool ret2 = split(min_length_cm, left_index + split_point, right_index, idx_sta, idx_sto, ccm_sta, ccm_sto, right_output, job_rng);
 
 		if (ret1 && ret2) {
 			//succesful split, so operate it
@@ -69,7 +69,7 @@ bool window_set::split(double min_length_cm, int left_index, int right_index, ve
 }
 
 
-int window_set::build (variant_map & V, genotype * g, float min_window_size) {
+int window_set::build (variant_map & V, genotype * g, float min_window_size, random_number_generator & job_rng) {
 
 	//1. Mapping coordinates of each segment
 	vector < unsigned int > loc_idx = vector < unsigned int >(g->n_segments, 0);
@@ -117,7 +117,7 @@ int window_set::build (variant_map & V, genotype * g, float min_window_size) {
 	vector < int > output;
 	output.push_back(0);
 	output.push_back(g->n_segments-1);
-	split(min_window_size, 0, g->n_segments-1, idx_sta, idx_sto, ccm_sta, ccm_sto, output);
+	split(min_window_size, 0, g->n_segments-1, idx_sta, idx_sto, ccm_sta, ccm_sto, output, job_rng);
 	int n_windows = output.size()/2;
 
 	//3. Update coordinates

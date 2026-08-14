@@ -64,6 +64,7 @@ public:
 	std::vector < unsigned int > iteration_types;
 	std::vector < unsigned int > iteration_counts;
 	unsigned int iteration_stage;
+	uint32_t iteration_index;
 	int n_underflow_recovered_summing;
 	int n_underflow_recovered_precision;
 
@@ -97,5 +98,4 @@ public:
 
 
 #endif
-
 

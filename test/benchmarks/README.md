@@ -48,8 +48,23 @@ are checked in—no derived BCF data. Results and full command logs default to
 the same user-specific `/tmp/` directory. Set `SHAPEIT5_BENCHMARK_TMP` or pass
 `--output-dir` to choose another temporary workspace.
 
+The recorded hashes are pinned to Philox4x32-10 RNG ABI version 1. A future RNG
+ABI deliberately changes the random stream and therefore requires an explicit,
+scientifically reviewed baseline update.
+
 Use `--prepare-only` to generate and verify the `/tmp/` fixtures without
 requiring built SHAPEIT5 executables.
+
+To verify the RNG's scheduling independence, run every case at 1, 2, 4, and 8
+worker threads and require identical canonical GT output:
+
+```sh
+make benchmark-threads
+```
+
+Pass repeated `--thread N` options directly to `thread_determinism.py` to use a
+different matrix. This check deliberately requires exact phasing, not merely a
+scientifically equivalent global haplotype-label flip.
 
 The phasing binaries still require the platform documented by SHAPEIT5 (in
 particular AVX2 for the current `phase_common` implementation). Python 3 and
@@ -76,6 +91,8 @@ haplotype-label flip per sample. Local phase changes fail.
 Wall time is always reported but is not gated by default because these cases
 are short. A deliberately controlled performance job can add, for example,
 `--max-runtime-ratio 1.20`. Use `--case NAME` to run one case.
+Use `--seed N` for replicate scientific comparisons; recorded exact hashes are
+checked only for the default seed.
 
 ## Comparator tests
 

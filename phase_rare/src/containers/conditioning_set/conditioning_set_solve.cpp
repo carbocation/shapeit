@@ -34,7 +34,8 @@ void conditioning_set::solve(variant_map & V, genotype_set & G) {
 	vector < int32_t > D = vector < int32_t > (n_haplotypes, 0);
 	vector < int32_t > R = vector < int32_t > (n_haplotypes, 0);
 	iota(A.begin(), A.end(), 0);
-	shuffle(A.begin(), A.end(), rng.getEngine());
+	random_number_generator order_rng = rng.fork(RNG_DOMAIN_PHASE_RARE_SOLVE_ORDER, 0, 0);
+	order_rng.shuffle(A.begin(), A.end());
 
 	//Get cM positions of the scaffold sites
 	vector < float > vs_cm = vector < float > (n_scaffold_variants, 0.0);

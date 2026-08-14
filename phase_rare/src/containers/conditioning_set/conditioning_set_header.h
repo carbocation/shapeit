@@ -74,8 +74,6 @@ public:
 	std::vector < cflip > CF;
 
 	//STATE DATA
-	uint32_t shuffledI;
-	std::vector < uint32_t > shuffledO;
 	std::vector < std::pair < uint32_t, uint32_t > > indexes_pbwt_neighbour_serialized;
 	std::vector < std::vector < uint32_t > > indexes_pbwt_neighbour;
 

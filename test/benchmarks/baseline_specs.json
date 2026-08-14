@@ -1,18 +1,20 @@
 {
   "source_commit": "c34d4db3e99a2f7e23deb727671ae260901a5886",
   "seed": 15052011,
+  "rng": "Philox4x32-10",
+  "rng_abi_version": 1,
   "cases": {
     "common-unrelated": {
-      "exact_gt_sha256": "a180ff531cfc2391e7f313e54af6fcb2a8a8349cc9078be7bf73ae75451b9f71",
-      "scientific_gt_sha256": "504be568d27fb71d29a88ff8e39ee7bfa93742ebeb3148eb3e1012ef1774bc3b"
+      "exact_gt_sha256": "5f88b89f6686375999780093849680f4b42005b02fbbe0b0bf37e6df1ae37ce2",
+      "scientific_gt_sha256": "112dd270877305a64d378abb466f6c7536384e821a8b676d1e27e89a166eea34"
     },
     "common-scaffolded": {
-      "exact_gt_sha256": "b1aa524047f7e6e740ecd6a4364324e494383c0543032304b90d4ebf9109803d",
-      "scientific_gt_sha256": "795170448b9f198d4e6028a71ad5ce23b7fe819f8112cc38e5638d6632869b6c"
+      "exact_gt_sha256": "bc8ece04a0ef61a15d69d9fba5c0f4a8b63a60be8ce87049be7f95070078779d",
+      "scientific_gt_sha256": "e238667e9645c7671ada2bb791f469d42dce637d905dd4bfe9732f39f069926a"
     },
     "rare-scaffolded": {
-      "exact_gt_sha256": "a7d9d4d8a3b58d2cafcad6ed2a45756e524534165667c20407dbba7eb3c27402",
-      "scientific_gt_sha256": "3ca39cd5e6d84a1da11a0c651d19ee06f8348bd18574ea6d1a26218aec7e28c6"
+      "exact_gt_sha256": "f23bfeda9bce60faf13f8f17ba63babb3155ee9ee406d72f77bb58cb88953c51",
+      "scientific_gt_sha256": "03bab6a46335d2125b90decbb707e91e6af1bed82ab74e6df144211d29230420"
     }
   }
 }

@@ -9,7 +9,7 @@ import os
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from vcf_compare import (
@@ -25,7 +25,7 @@ BENCHMARK_DIR = Path(__file__).resolve().parent
 REPOSITORY = BENCHMARK_DIR.parents[1]
 TEMP_ROOT = Path(os.environ.get("SHAPEIT5_BENCHMARK_TMP", f"/tmp/shapeit5-benchmarks-{os.getuid()}"))
 FIXTURES = TEMP_ROOT / "fixtures"
-DEFAULT_SEED = "15052011"
+DEFAULT_SEED = 15052011
 
 
 @dataclass(frozen=True)
@@ -51,7 +51,7 @@ CASES = {
             "--map",
             str(REPOSITORY / "test/info/chr1.gmap.gz"),
             "--seed",
-            DEFAULT_SEED,
+            str(DEFAULT_SEED),
             "--thread",
             "1",
             "--mcmc-iterations",
@@ -73,7 +73,7 @@ CASES = {
             "--map",
             str(REPOSITORY / "test/info/chr1.gmap.gz"),
             "--seed",
-            DEFAULT_SEED,
+            str(DEFAULT_SEED),
             "--thread",
             "1",
             "--mcmc-iterations",
@@ -95,7 +95,7 @@ CASES = {
             "--scaffold-region",
             "1:1-500000",
             "--seed",
-            DEFAULT_SEED,
+            str(DEFAULT_SEED),
             "--thread",
             "1",
             "--output-format",
@@ -136,6 +136,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=TEMP_ROOT / "out",
         help="directory for outputs, logs, and results.json",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
+        help=f"phasing seed (default: {DEFAULT_SEED})",
     )
     parser.add_argument(
         "--max-runtime-ratio",
@@ -193,6 +199,16 @@ def resolve_binary(location: Path, name: str) -> Path:
             return candidate.resolve()
     searched = ", ".join(str(path) for path in candidates)
     raise FileNotFoundError(f"cannot find executable {name}; searched {searched}")
+
+
+def with_argument(case: Case, option: str, value: object) -> Case:
+    arguments = list(case.arguments)
+    try:
+        index = arguments.index(option)
+    except ValueError as error:
+        raise RuntimeError(f"benchmark case {case.name} has no {option} argument") from error
+    arguments[index + 1] = str(value)
+    return replace(case, arguments=tuple(arguments))
 
 
 def run_case(
@@ -300,6 +316,8 @@ def compare_builds(
 
 def main() -> int:
     args = parse_args()
+    if args.seed < 0:
+        raise ValueError("--seed must be non-negative")
     if args.max_runtime_ratio is not None and args.max_runtime_ratio <= 0:
         raise ValueError("--max-runtime-ratio must be positive")
     ensure_fixtures(verify=not args.skip_fixture_check)
@@ -312,18 +330,22 @@ def main() -> int:
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     results: dict[str, object] = {
-        "seed": int(DEFAULT_SEED),
+        "seed": args.seed,
         "candidate": {},
         "baseline": {},
         "comparison": {},
     }
 
     for name in selected:
-        case = CASES[name]
+        case = with_argument(CASES[name], "--seed", args.seed)
         if args.baseline_bin_dir:
             baseline = run_case(case, args.baseline_bin_dir, output_dir, "baseline")
             results["baseline"][name] = baseline  # type: ignore[index]
-        recorded_baseline = None if args.baseline_bin_dir else recorded_cases[name]
+        recorded_baseline = (
+            recorded_cases[name]
+            if not args.baseline_bin_dir and args.seed == DEFAULT_SEED
+            else None
+        )
         candidate = run_case(
             case, args.bin_dir, output_dir, "candidate", recorded_baseline
         )

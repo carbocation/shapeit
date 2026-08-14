@@ -47,9 +47,9 @@ void compute_job::free () {
 	Windows.clear();
 }
 
-void compute_job::make(unsigned int ind, double min_window_size) {
+void compute_job::make(unsigned int ind, double min_window_size, random_number_generator & job_rng) {
 	//1. Mapping coordinates of each segment
-	int n_windows = Windows.build (V, G.vecG[ind], min_window_size);
+	int n_windows = Windows.build (V, G.vecG[ind], min_window_size, job_rng);
 
 	//2. Update conditional haps
 	unsigned long addr_offset = H.sites_pbwt_ngroups * H.n_ind * 2UL;

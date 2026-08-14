@@ -41,7 +41,11 @@ void * phaseWindow_callback(void * ptr) {
 }
 
 void phaser::phaseWindow(int id_worker, int id_job) {
-	threadData[id_worker].make(id_job, options["hmm-window"].as < double > ());
+	random_number_generator window_rng = rng.fork(RNG_DOMAIN_PHASE_COMMON_WINDOW, iteration_index, id_job);
+	random_number_generator sample_rng = rng.fork(RNG_DOMAIN_PHASE_COMMON_MCMC, iteration_index, id_job);
+	threadData[id_worker].make(id_job, options["hmm-window"].as < double > (), window_rng);
+	int underflow_recovered_summing = 0;
+	int underflow_recovered_precision = 0;
 
 	//HMM compute in windows
 	for (int w = 0 ; w < threadData[id_worker].size() ; w ++) {
@@ -69,7 +73,7 @@ void phaser::phaseWindow(int id_worker, int id_job) {
 				HS.forward();
 				outcome = HS.backward(threadData[id_worker].T, threadData[id_worker].M);
 				G.vecG[id_job]->double_precision = true;
-				n_underflow_recovered_precision++;
+				underflow_recovered_precision++;
 			}
 		}
 
@@ -78,24 +82,26 @@ void phaser::phaseWindow(int id_worker, int id_job) {
 		case -2: vrb.error("Diploid underflow impossible to recover for [" + G.vecG[id_job]->name + "]");
 		case -1: vrb.error("Haploid underflow impossible to recover for [" + G.vecG[id_job]->name + "]");
 		}
-		n_underflow_recovered_summing += outcome;
+		underflow_recovered_summing += outcome;
 	}
 
 	//Copy over new IBD2 constraints into H
 	if (options["thread"].as < int > () > 1) pthread_mutex_lock(&mutex_workers);
+	n_underflow_recovered_summing += underflow_recovered_summing;
+	n_underflow_recovered_precision += underflow_recovered_precision;
 	H.Kbanned.pushIBD2(id_job, threadData[id_worker].Kbanned);
 	if (options["thread"].as < int > () > 1) pthread_mutex_unlock(&mutex_workers);
 
 	//Sampling / Merging / Storing
 	vector < bool > flagMerges;
 	switch (iteration_types[iteration_stage]) {
-	case STAGE_BURN:	G.vecG[id_job]->sample(threadData[id_worker].T, threadData[id_worker].M);
-						break;
-	case STAGE_PRUN:	G.vecG[id_job]->sample(threadData[id_worker].T, threadData[id_worker].M);
+	case STAGE_BURN:	G.vecG[id_job]->sample(threadData[id_worker].T, threadData[id_worker].M, sample_rng);
+							break;
+	case STAGE_PRUN:	G.vecG[id_job]->sample(threadData[id_worker].T, threadData[id_worker].M, sample_rng);
 						G.vecG[id_job]->mapMerges(threadData[id_worker].T, options["mcmc-prune"].as < double > (), flagMerges);
 						G.vecG[id_job]->performMerges(threadData[id_worker].T, flagMerges);
 						break;
-	case STAGE_MAIN:	G.vecG[id_job]->sample(threadData[id_worker].T, threadData[id_worker].M);
+	case STAGE_MAIN:	G.vecG[id_job]->sample(threadData[id_worker].T, threadData[id_worker].M, sample_rng);
 						G.vecG[id_job]->store(threadData[id_worker].T, threadData[id_worker].M);
 						break;
 	}
@@ -120,7 +126,8 @@ void phaser::phaseWindow() {
 }
 
 void phaser::phase() {
-	unsigned long n_old_segments = G.numberOfSegments(), n_new_segments = 0, current_iteration = 0;
+	unsigned long n_old_segments = G.numberOfSegments(), n_new_segments = 0;
+	iteration_index = 0;
 	for (iteration_stage = 0 ; iteration_stage < iteration_counts.size() ; iteration_stage ++) {
 		for (int iter = 0 ; iter < iteration_counts[iteration_stage] ; iter ++) {
 			//VERBOSE
@@ -130,7 +137,7 @@ void phaser::phase() {
 			case STAGE_MAIN:	vrb.title("Main iteration [" + stb.str(iter+1) + "/" + stb.str(iteration_counts[iteration_stage]) + "]"); break;
 			}
 			//SELECT NEW STATES WITH PBWT
-			H.select();
+			H.select(iteration_index);
 			//PHASE DATA
 			phaseWindow();
 			//MERGE IBD2 PAIRS
@@ -145,6 +152,7 @@ void phaser::phase() {
 				n_new_segments = G.numberOfSegments();
 				vrb.bullet("Trimming [pc=" + stb.str((1-n_new_segments*1.0/n_old_segments)*100, 2) + "%]");
 			}
+			iteration_index++;
 		}
 	}
 }

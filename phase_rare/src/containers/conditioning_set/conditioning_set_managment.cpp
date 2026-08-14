@@ -68,8 +68,5 @@ void conditioning_set::initialize(variant_map & V, float _modulo_selection, floa
 	//ALLOCATE
 	indexes_pbwt_neighbour = vector < vector < uint32_t > > (n_haplotypes);
 	IBD2 = vector < vector < uint32_t > > (n_haplotypes / 2);
-	shuffledI = 0;
-	shuffledO = vector < uint32_t > (n_haplotypes);
-	iota(shuffledO.begin(), shuffledO.end(), 0);
 	vrb.bullet("PBWT initialization [#eval=" + stb.str(n_evaluated) + " / #select=" + stb.str(sites_pbwt_grouping.back() + 1) + "] (" + stb.str(tac.rel_time()*1.0/1000, 2) + "s)");
 }

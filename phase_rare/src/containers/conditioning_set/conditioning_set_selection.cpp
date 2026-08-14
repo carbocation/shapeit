@@ -35,7 +35,8 @@ void conditioning_set::select(variant_map & V, genotype_set & G) {
 	vector < int32_t > R = vector < int32_t > (n_haplotypes, 0);
 	vector < int32_t > M = vector < int32_t > (depth_common * n_haplotypes, -1);
 	iota(A.begin(), A.end(), 0);
-	random_shuffle(A.begin(), A.end());
+	random_number_generator order_rng = rng.fork(RNG_DOMAIN_PHASE_RARE_SELECTION_ORDER, 0, 0);
+	order_rng.shuffle(A.begin(), A.end());
 
 	//Select new sites at which to trigger storage
 	vector < vector < int32_t > > candidates = vector < vector < int32_t > > (sites_pbwt_grouping.back() + 1);
@@ -43,7 +44,8 @@ void conditioning_set::select(variant_map & V, genotype_set & G) {
 	sites_pbwt_selection = vector < bool > (n_scaffold_variants , false);
 	for (int32_t g = 0 ; g < candidates.size() ; g++) {
 		if (candidates[g].size() > 0) {
-			sites_pbwt_selection[candidates[g][rng.getInt(candidates[g].size())]] = true;
+			random_number_generator site_rng = rng.fork(RNG_DOMAIN_PHASE_RARE_PBWT_SITE, 0, g);
+			sites_pbwt_selection[candidates[g][site_rng.getInt(candidates[g].size())]] = true;
 		}
 	}
 
@@ -111,9 +113,10 @@ void conditioning_set::select(variant_map & V, genotype_set & G) {
 
 		//Minimal number of states is 50
 		if (buffer.size() < 50) {
+			random_number_generator fallback_rng = rng.fork(RNG_DOMAIN_PHASE_RARE_FALLBACK, 0, h);
 			while (buffer.size() < 50) {
-				if (!checkIBD2(shuffledO[shuffledI], h)) buffer.push_back(rng.getInt(n_haplotypes));
-				shuffledI = (shuffledI<(n_haplotypes-1))?(shuffledI+1):0;
+				uint32_t candidate = fallback_rng.getInt(n_haplotypes);
+				if (!checkIBD2(candidate, h)) buffer.push_back(candidate);
 			}
 			sort(buffer.begin(), buffer.end());
 			buffer.erase(unique(buffer.begin(), buffer.end()), buffer.end());
@@ -217,4 +220,3 @@ void conditioning_set::storeCommon(vector < int32_t > & A, vector < int32_t > & 
 		}
 	}
 }
-

@@ -112,7 +112,11 @@ The scaffold can contain data for a subset of samples at a subset of variant sit
 |:---------------------|:--------|:---------|:-------------------------------------|
 | \-\-help             | NA      | NA       | Produces help message |
 | \-\-seed             | INT     | 15052011 | Seed of the random number generator  |
+| \-\-rng-version      | INT     | 1        | Versioned mapping from logical work to Philox streams |
 | \-T \[ \-\-thread \] | INT     | 1        | Number of thread used|
+
+For a fixed seed and RNG version, phasing is independent of the worker-thread
+count.
 
 #### Input files
 

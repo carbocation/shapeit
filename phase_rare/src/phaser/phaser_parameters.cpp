@@ -31,6 +31,7 @@ void phaser::declare_options() {
 	opt_base.add_options()
 			("help", "Produce help message")
 			("seed", bpo::value<int>()->default_value(15052011), "Seed of the random number generator")
+			("rng-version", bpo::value < int >()->default_value(SHAPEIT_RNG_ABI_VERSION), "Versioned random number mapping")
 			("thread", bpo::value<int>()->default_value(1), "Number of thread used")
 			("progress", "Verbose progress percentages on screen for longer tasks");
 			
@@ -108,8 +109,8 @@ void phaser::check_options() {
 	if (options.count("thread") && options["thread"].as < int32_t > () < 1)
 		vrb.error("You must use at least 1 thread");
 
-	if (!options["thread"].defaulted() && !options["seed"].defaulted())
-		vrb.warning("Using multi-threading prevents reproducing a run by specifying --seed");
+	if (options["rng-version"].as < int > () != SHAPEIT_RNG_ABI_VERSION)
+		vrb.error("Unsupported RNG version [" + stb.str(options["rng-version"].as < int > ()) + "]");
 
 	if (!options["effective-size"].defaulted() && options["effective-size"].as < int32_t > () < 1)
 		vrb.error("You must specify a positive effective size");
@@ -134,6 +135,7 @@ void phaser::verbose_files() {
 void phaser::verbose_options() {
 	vrb.title("Parameters:");
 	vrb.bullet("Seed    : " + stb.str(options["seed"].as < int32_t > ()));
+	vrb.bullet("RNG     : Philox4x32-10 / ABI v" + stb.str(random_number_generator::abiVersion()));
 	vrb.bullet("Threads : " + stb.str(options["thread"].as < int32_t > ()) + " threads");
 	vrb.bullet("PBWT    : [depth = " + stb.str(options["pbwt-depth-common"].as < int32_t > ()) + "," + stb.str(options["pbwt-depth-rare"].as < int32_t > ()) + " / modulo = " + stb.str(options["pbwt-modulo"].as < double > ()) + " / mac = " + stb.str(options["pbwt-mac"].as < int32_t > ()) + " / mdr = " + stb.str(options["pbwt-mdr"].as < double > ()) + "]");
 	if (options.count("map")) vrb.bullet("HMM     : [Ne = " + stb.str(options["effective-size"].as < int32_t > ()) + " / Recombination rates given by genetic map]");

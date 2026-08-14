@@ -10,6 +10,7 @@ SHAPEIT5 estimates haplotypes in large datasets, with a special focus on rare va
 - **resources**: genetics maps in b37 and b38 amd coordinates for WGS chunks
 - **phase_common**: phase common sites, typically SNP array data
 - **phase_rare**: phase rare variants onto a scaffold of common variants
+- **rng**: versioned Rust/Philox random-number kernel shared through a C ABI
 - **static_bins**: static binaries of all executables
 - **simulate**: simulate simple haplotype datasets
 - **switch**: compute switch error rate and genotyping error rate given simulated or trio data

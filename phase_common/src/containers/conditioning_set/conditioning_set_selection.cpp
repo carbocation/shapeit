@@ -147,7 +147,7 @@ void conditioning_set::store(int l, vector < int > & A, vector < int > & C) {
 	}
 }
 
-void conditioning_set::select() {
+void conditioning_set::select(uint32_t iteration) {
 	tac.clock();
 	i_worker = 0; i_job = 0, d_job = 0;
 
@@ -157,7 +157,8 @@ void conditioning_set::select() {
 	sites_pbwt_selection = vector < bool > (n_site , false);
 	for (int g = 0 ; g < candidates.size() ; g++) {
 		if (candidates[g].size() > 0) {
-			sites_pbwt_selection[candidates[g][rng.getInt(candidates[g].size())]] = true;
+			random_number_generator site_rng = rng.fork(RNG_DOMAIN_PHASE_COMMON_PBWT_SITE, iteration, g);
+			sites_pbwt_selection[candidates[g][site_rng.getInt(candidates[g].size())]] = true;
 		}
 	}
 
@@ -179,4 +180,3 @@ void conditioning_set::select() {
 
 	vrb.bullet("PBWT selection (" + stb.str(tac.rel_time()*1.0/1000, 2) + "s)");
 }
-

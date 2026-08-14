@@ -24,12 +24,12 @@
 
 using namespace std;
 
-void genotype::sample(vector < double > & CurrentTransProbabilities, vector < float > & CurrentMissingProbabilities) {
-	if (rng.getDouble() < 0.5f) sampleForward(CurrentTransProbabilities, CurrentMissingProbabilities);
-	else sampleBackward(CurrentTransProbabilities, CurrentMissingProbabilities);
+void genotype::sample(vector < double > & CurrentTransProbabilities, vector < float > & CurrentMissingProbabilities, random_number_generator & job_rng) {
+	if (job_rng.getDouble() < 0.5f) sampleForward(CurrentTransProbabilities, CurrentMissingProbabilities, job_rng);
+	else sampleBackward(CurrentTransProbabilities, CurrentMissingProbabilities, job_rng);
 }
 
-void genotype::sampleForward(vector < double > & CurrentTransProbabilities, vector < float > & CurrentMissingProbabilities) {
+void genotype::sampleForward(vector < double > & CurrentTransProbabilities, vector < float > & CurrentMissingProbabilities, random_number_generator & job_rng) {
 	double sumProbs = 0.0;
 	unsigned int prev_sampled = 0;
 	unsigned int curr_dipcount = 0, prev_dipcount = 1;
@@ -40,16 +40,16 @@ void genotype::sampleForward(vector < double > & CurrentTransProbabilities, vect
 		curr_dipcount = countDiplotypes(Diplotypes[s]);
 		for (unsigned int tabs = toffset + prev_sampled*curr_dipcount, trel = 0 ; trel < curr_dipcount ; ++trel, ++tabs)
 			sumProbs += (currProbs[trel] = CurrentTransProbabilities[tabs]);
-		prev_sampled = rng.sample(currProbs, sumProbs);
+		prev_sampled = job_rng.sample(currProbs, sumProbs);
 		makeDiplotypes(Diplotypes[s]);
 		DipSampled[s] = curr_dipcodes[prev_sampled];
 		toffset += prev_dipcount * curr_dipcount;
 		prev_dipcount = curr_dipcount;
 	}
-	make(DipSampled, CurrentMissingProbabilities);
+	make(DipSampled, CurrentMissingProbabilities, job_rng);
 }
 
-void genotype::sampleBackward(vector < double > & CurrentTransProbabilities, vector < float > & CurrentMissingProbabilities) {
+void genotype::sampleBackward(vector < double > & CurrentTransProbabilities, vector < float > & CurrentMissingProbabilities, random_number_generator & job_rng) {
 
 	double sumProbs = 0.0;
 	int next_sampled = -1;
@@ -66,13 +66,13 @@ void genotype::sampleBackward(vector < double > & CurrentTransProbabilities, vec
 			currProbs.resize(64);
 			for (unsigned int tabs = toffset+next_sampled, trel = 0 ; trel < curr_dipcount ; ++trel, tabs += next_dipcount)
 				sumProbs += (currProbs[trel] = CurrentTransProbabilities[tabs]);
-			next_sampled = rng.sample(currProbs, sumProbs);
+			next_sampled = job_rng.sample(currProbs, sumProbs);
 			makeDiplotypes(Diplotypes[s]);
 			DipSampled[s] = curr_dipcodes[next_sampled];
 		} else {
 			for (unsigned int tabs = toffset, trel = 0 ; tabs < n_transitions ; ++trel, ++tabs)
 				sumProbs += (currProbs[trel] = CurrentTransProbabilities[tabs]);
-			next_sampled = rng.sample(currProbs, sumProbs);
+			next_sampled = job_rng.sample(currProbs, sumProbs);
 			makeDiplotypes(Diplotypes[s+1]);
 			DipSampled[s+1] = curr_dipcodes[next_sampled % next_dipcount];
 			makeDiplotypes(Diplotypes[s]);
@@ -81,7 +81,7 @@ void genotype::sampleBackward(vector < double > & CurrentTransProbabilities, vec
 		}
 		next_dipcount = curr_dipcount;
 	}
-	make(DipSampled, CurrentMissingProbabilities);
+	make(DipSampled, CurrentMissingProbabilities, job_rng);
 }
 
 void genotype::solve() {
@@ -139,4 +139,3 @@ void genotype::store(vector < double > & CurrentTransProbabilities, vector < flo
 	for (unsigned int m = 0 ; m < (n_missing * HAP_NUMBER) ; m ++) ProbMissing[m] += CurrentMissingProbabilities[m];
 	n_storage_events ++;
 }
-

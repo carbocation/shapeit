@@ -57,7 +57,7 @@ public:
 	~compute_job();
 
 	void free();
-	void make(unsigned int, double);
+	void make(unsigned int, double, random_number_generator &);
 	unsigned int size();
 };
 

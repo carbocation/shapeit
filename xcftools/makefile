@@ -10,6 +10,13 @@ dummy_build_folder_obj := $(shell mkdir -p obj)
 CXXFLAG=-O3 -mavx2 -mfma
 LDFLAG=-O3
 
+# VERSIONED RANDOM-NUMBER KERNEL
+RNG_DIR=../rng
+RNG_LIB=$(RNG_DIR)/target/release/libshapeit_rng.a
+RNG_SOURCE=$(RNG_DIR)/Cargo.toml $(RNG_DIR)/Cargo.lock $(shell find $(RNG_DIR)/src -name '*.rs')
+RNG_HEADERS=$(RNG_DIR)/include/shapeit_rng.h
+CXXFLAG+= -I$(RNG_DIR)/include
+
 #COMMIT TRACING
 COMMIT_VERS=$(shell git rev-parse --short HEAD)
 COMMIT_DATE=$(shell git log -1 --format=%cd --date=short)
@@ -150,17 +157,20 @@ dnanexus: $(BFILE)
 #COMPILATION RULES
 all: desktop
 
-$(BFILE): $(OFILE)
+$(BFILE): $(OFILE) $(RNG_LIB)
 	$(CXX) $(LDFLAG) $^ -o $@ $(DYN_LIBS)
 
-$(DBGFILE): $(OFILE)
+$(DBGFILE): $(OFILE) $(RNG_LIB)
 	$(CXX) $(LDFLAG) $^ -o $@ $(DYN_LIBS)
 	
-$(EXEFILE): $(OFILE)
+$(EXEFILE): $(OFILE) $(RNG_LIB)
 	$(CXX) $(LDFLAG) -static -static-libgcc -static-libstdc++ -pthread -o $(EXEFILE) $^ $(HTSLIB_LIB) $(BOOST_LIB_IO) $(BOOST_LIB_PO) -Wl,-Bstatic $(DYN_LIBS_FOR_STATIC)
 
-obj/%.o: %.cpp $(HFILE)
-	$(CXX) $(CXXFLAG) -c $< -o $@ -Isrc -I$(HTSLIB_INC) -I$(BOOST_INC)
+$(RNG_LIB): $(RNG_SOURCE)
+	cargo build --release --manifest-path $(RNG_DIR)/Cargo.toml
+
+obj/%.o: %.cpp $(HFILE) $(RNG_HEADERS)
+	$(CXX) $(CXXFLAG) -c $< -o $@ -Isrc -I$(RNG_DIR)/include -I$(HTSLIB_INC) -I$(BOOST_INC)
 
 clean:
 	rm -f obj/*.o $(BFILE) $(DBGFILE) $(EXEFILE)

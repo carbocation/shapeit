@@ -63,6 +63,7 @@ void conditioning_set::solve(int chunk, genotype_set * GS) {
 	vector < bool > Het = vector < bool > (n_ind, 0);
 	vector < bool > Mis = vector < bool > (n_ind, 0);
 	vector < bool > Amb = vector < bool > (n_ind, 0);
+	const unsigned long bytes_per_locus = H_opt_var.n_cols / 8;
 
 	iota(A.begin(), A.end(), 0);
 	fill(C.begin(), C.end(), 0);
@@ -101,6 +102,7 @@ void conditioning_set::solve(int chunk, genotype_set * GS) {
 							else ++nh;
 						}
 						if (Mis[i]) {
+							s0 = s1 = 0.0;
 							if (R[h+0]>0) s0 = G[A[R[h+0]-1]];
 							if (R[h+0]<(n_hap-1)) s0 += G[A[R[h+0]+1]];
 							if (R[h+1]>0) s1 = G[A[R[h+1]-1]];
@@ -133,6 +135,7 @@ void conditioning_set::solve(int chunk, genotype_set * GS) {
 							else { G[h+0] = -1 ; G[h+1] = 1 ; }
 						}
 						if (Mis[i]) {
+							s0 = s1 = 0.0;
 							if (R[h+0]>0) s0 = G[A[R[h+0]-1]] * scoreBit[l - C[R[h+0]] + 1];
 							if (R[h+0]<(n_hap-1)) s0 += G[A[R[h+0]+1]] * scoreBit[l - C[R[h+0]+1]+1];
 							if (R[h+1]>0) s1 = G[A[R[h+1]-1]] * scoreBit[l - C[R[h+1]] + 1];
@@ -161,7 +164,12 @@ void conditioning_set::solve(int chunk, genotype_set * GS) {
 				int alookup = A[h], dlookup = C[h];
 				if (dlookup > p) p = dlookup;
 				if (dlookup > q) q = dlookup;
-				if (!H_opt_var.get(l, alookup)) {
+				unsigned char allele;
+				if (buff) {
+					unsigned long addr = (l - starts_pbwt_mthreading[chunk]) * bytes_per_locus + alookup / 8;
+					allele = (solve_buffers[chunk][addr] >> (7 - (alookup % 8))) & 1;
+				} else allele = H_opt_var.get(l, alookup);
+				if (!allele) {
 					A[u] = alookup;
 					C[u] = p;
 					p = 0;
@@ -190,6 +198,20 @@ void conditioning_set::solve(genotype_set * GS) {
 	scoreBit = vector < float > (n_site + 1, 0.0);
 	for (int l = 0 ; l < n_site+1 ; ++l) scoreBit[l] = log (l + 1.0);
 
+	// Each PBWT chunk replays a short prefix before its writable interval. Keep
+	// those prefixes immutable so a chunk never observes another chunk's
+	// concurrently phased output.
+	unsigned long bytes_per_locus = H_opt_var.n_cols / 8;
+	int n_chunks = sites_pbwt_mthreading.back() + 1;
+	solve_buffers = vector < vector < unsigned char > > (n_chunks);
+	for (int chunk = 0, first_locus = 0 ; chunk < n_chunks ; ++chunk) {
+		while (first_locus < n_site && sites_pbwt_mthreading[first_locus] < chunk) first_locus++;
+		int buffer_start = starts_pbwt_mthreading[chunk];
+		unsigned long buffer_bytes = (first_locus - buffer_start) * bytes_per_locus;
+		solve_buffers[chunk].resize(buffer_bytes);
+		if (buffer_bytes) memcpy(solve_buffers[chunk].data(), H_opt_var.bytes + buffer_start * bytes_per_locus, buffer_bytes);
+	}
+
 	//Perform multi-threaded selection
 
 	solver_callback_params tp;
@@ -204,10 +226,10 @@ void conditioning_set::solve(genotype_set * GS) {
 		solve(c, GS);
 		vrb.progress("  * PBWT phasing sweep", c*1.0/(sites_pbwt_mthreading.back()+1));
 	}
+	solve_buffers.clear();
 
 	//Transpose to push new haps into H hap first
 	transposeHaplotypes_V2H(false, false);
 
 	vrb.bullet("PBWT phasing sweep (" + stb.str(tac.rel_time()*1.0/1000, 2) + "s)");
 }
-
