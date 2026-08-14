@@ -1,6 +1,6 @@
 projects = phase_common phase_rare switch ligate simulate xcftools
 
-.PHONY: all $(projects) benchmark benchmark-threads benchmark-unit rng-test
+.PHONY: all $(projects) benchmark benchmark-threads benchmark-edge benchmark-unit rng-test
 
 all: $(projects)
 
@@ -31,6 +31,9 @@ benchmark:
 
 benchmark-threads:
 	python3 test/benchmarks/thread_determinism.py --bin-dir .
+
+benchmark-edge:
+	python3 test/benchmarks/edge_regressions.py --bin-dir .
 
 benchmark-unit: rng-test
 	python3 -m unittest discover -s test/benchmarks/tests -v

@@ -66,6 +66,15 @@ Pass repeated `--thread N` options directly to `thread_determinism.py` to use a
 different matrix. This check deliberately requires exact phasing, not merely a
 scientifically equivalent global haplotype-label flip.
 
+Focused boundary regressions force `phase_common` through its sparse-PBWT
+fallback and exercise `phase_rare` with an odd common-state depth and with no
+serialized PBWT neighbours. Each scenario must also be byte-identical across
+one and four worker threads:
+
+```sh
+make benchmark-edge
+```
+
 The phasing binaries still require the platform documented by SHAPEIT5 (in
 particular AVX2 for the current `phase_common` implementation). Python 3 and
 either HTSlib's `htsfile` command or `bcftools` are also required to inspect BCF

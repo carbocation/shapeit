@@ -32,7 +32,6 @@ compute_job::compute_job(variant_map & _V, genotype_set & _G, conditioning_set &
 	M = vector < float > (n_max_missing , 0.0);
 	Ordering = vector < unsigned int > (H.n_hap);
 	iota(Ordering.begin(), Ordering.end(), 0);
-	Oiterator = 0;
 }
 
 compute_job::~compute_job() {
@@ -47,7 +46,7 @@ void compute_job::free () {
 	Windows.clear();
 }
 
-void compute_job::make(unsigned int ind, double min_window_size, random_number_generator & job_rng) {
+void compute_job::make(unsigned int ind, double min_window_size, random_number_generator & job_rng, random_number_generator & fallback_rng) {
 	//1. Mapping coordinates of each segment
 	int n_windows = Windows.build (V, G.vecG[ind], min_window_size, job_rng);
 
@@ -109,13 +108,18 @@ void compute_job::make(unsigned int ind, double min_window_size, random_number_g
 	//4. Protect for #states = 0
 	for (int w = 0 ; w < n_windows; w++) {
 		if (Kstates[w].size() < 2) {
-			for (int i = 0 ; i < N_RANDOM_HAPS ; i++) {
-				int random_state = Ordering[Oiterator];
-				if (random_state/2 != ind) Kstates[w].push_back(random_state);
-				Oiterator=((Oiterator+1)==H.n_hap)?0:(Oiterator+1);
+			iota(Ordering.begin(), Ordering.end(), 0);
+			fallback_rng.shuffle(Ordering.begin(), Ordering.end());
+			int n_added = 0;
+			for (unsigned int random_state : Ordering) {
+				if (random_state/2 != ind) {
+					Kstates[w].push_back(random_state);
+					if (++n_added == N_RANDOM_HAPS) break;
+				}
 			}
 			sort(Kstates[w].begin(), Kstates[w].end());
 			Kstates[w].erase(unique(Kstates[w].begin(), Kstates[w].end()), Kstates[w].end());
+			if (Kstates[w].size() < 2) vrb.error("Fewer than two conditioning haplotypes are available for [" + G.vecG[ind]->name + " / w=" + stb.str(w) + "]");
 			vrb.warning("No PBWT states found [" + G.vecG[ind]->name  + " / w=" + stb.str(w) + "] / Using " + stb.str(Kstates[w].size()) + " random states");
 		}
 	}

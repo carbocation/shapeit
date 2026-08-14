@@ -34,6 +34,7 @@ Domain numbers are part of ABI version 1 and must not be renumbered:
 | 5 | `phase_rare` PBWT site selection |
 | 6 | `phase_rare` fallback-state selection |
 | 7 | `phase_rare` PBWT solve ordering |
+| 8 | `phase_common` sparse-PBWT fallback-state selection |
 
 Beginning with ABI version 1, any incompatible change requires a new exported
 ABI function and a new RNG version. Existing versioned mappings and conversion

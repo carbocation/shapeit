@@ -106,21 +106,39 @@ void conditioning_set::select(variant_map & V, genotype_set & G) {
 	stats1D statK;
 	for (int64_t h = 0, e = 0 ; h < n_haplotypes ; h ++) {
 		vector < uint32_t > buffer;
-		while (indexes_pbwt_neighbour_serialized[e].first == h) {
+		while (e < indexes_pbwt_neighbour_serialized.size() && indexes_pbwt_neighbour_serialized[e].first == h) {
 			buffer.push_back(indexes_pbwt_neighbour_serialized[e].second);
 			e++;
 		}
+		sort(buffer.begin(), buffer.end());
+		buffer.erase(unique(buffer.begin(), buffer.end()), buffer.end());
 
 		//Minimal number of states is 50
 		if (buffer.size() < 50) {
 			random_number_generator fallback_rng = rng.fork(RNG_DOMAIN_PHASE_RARE_FALLBACK, 0, h);
-			while (buffer.size() < 50) {
+			const uint64_t max_random_attempts = std::max<uint64_t>(1000, 10ULL * n_haplotypes);
+			for (uint64_t attempt = 0 ; buffer.size() < 50 && attempt < max_random_attempts ; ++attempt) {
 				uint32_t candidate = fallback_rng.getInt(n_haplotypes);
-				if (!checkIBD2(candidate, h)) buffer.push_back(candidate);
+				if (!checkIBD2(candidate, h)) {
+					auto position = lower_bound(buffer.begin(), buffer.end(), candidate);
+					if (position == buffer.end() || *position != candidate) buffer.insert(position, candidate);
+				}
 			}
-			sort(buffer.begin(), buffer.end());
-			buffer.erase(unique(buffer.begin(), buffer.end()), buffer.end());
+
+			//A bounded exhaustive pass guarantees termination and fills all
+			//available states when fewer than 50 survive IBD2 exclusion.
+			if (buffer.size() < 50) {
+				uint32_t start = fallback_rng.getInt(n_haplotypes);
+				for (uint32_t offset = 0 ; offset < n_haplotypes && buffer.size() < 50 ; ++offset) {
+					uint32_t candidate = (start + offset) % n_haplotypes;
+					if (!checkIBD2(candidate, h)) {
+						auto position = lower_bound(buffer.begin(), buffer.end(), candidate);
+						if (position == buffer.end() || *position != candidate) buffer.insert(position, candidate);
+					}
+				}
+			}
 		}
+		if (buffer.empty()) vrb.error("No conditioning haplotype remains after IBD2 exclusion for haplotype [" + stb.str(h) + "]");
 
 		indexes_pbwt_neighbour[h].reserve(buffer.size());
 		indexes_pbwt_neighbour[h] = buffer;
@@ -179,12 +197,12 @@ void conditioning_set::storeCommon(vector < int32_t > & A, vector < int32_t > & 
 			if ((h-offset0)>=0) {
 				hap_guess0 = A[h-offset0];
 				//add_guess0 = (hap_guess0/2 != chap/2);
-				add_guess0 = !checkIBD2(hap_guess0/2, chap/2);
+				add_guess0 = !checkIBD2(hap_guess0, chap);
 			} else add_guess0 = 0;
 			if ((h+offset1)<n_haplotypes) {
 				hap_guess1 = A[h+offset1];
 				//add_guess1 = (hap_guess1/2 != chap/2);
-				add_guess1 = !checkIBD2(hap_guess1/2, chap/2);
+				add_guess1 = !checkIBD2(hap_guess1, chap);
 			} else add_guess1 = 0;
 			if (add_guess0 && add_guess1) {
 				if (hap_guess0 != M[chap * depth_common + n_added]) {
@@ -193,12 +211,14 @@ void conditioning_set::storeCommon(vector < int32_t > & A, vector < int32_t > & 
 					npushes++;
 				} else ncollisions++;
 				offset0++; n_added++;
-				if (hap_guess1 != M[chap * depth_common + n_added]) {
-					indexes_pbwt_neighbour_serialized.push_back(pair < uint32_t, uint32_t > (chap, hap_guess1));
-					M[chap * depth_common + n_added] = hap_guess1;
-					npushes++;
-				} else ncollisions++;
-				offset1++; n_added++;
+				if (n_added < depth_common) {
+					if (hap_guess1 != M[chap * depth_common + n_added]) {
+						indexes_pbwt_neighbour_serialized.push_back(pair < uint32_t, uint32_t > (chap, hap_guess1));
+						M[chap * depth_common + n_added] = hap_guess1;
+						npushes++;
+					} else ncollisions++;
+					offset1++; n_added++;
+				}
 			} else if (add_guess0) {
 				if (hap_guess0 != M[chap * depth_common + n_added]) {
 					indexes_pbwt_neighbour_serialized.push_back(pair < uint32_t, uint32_t > (chap, hap_guess0));
@@ -214,6 +234,7 @@ void conditioning_set::storeCommon(vector < int32_t > & A, vector < int32_t > & 
 				} else ncollisions++;
 				offset1++; n_added++;
 			} else {
+				if ((h-offset0)<0 && (h+offset1)>=n_haplotypes) break;
 				offset0++;
 				offset1++;
 			}
