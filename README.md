@@ -15,6 +15,7 @@ SHAPEIT5 estimates haplotypes in large datasets, with a special focus on rare va
 - **switch**: compute switch error rate and genotyping error rate given simulated or trio data
 - **tasks**: scripts used to phase large datasets, good base to start pipelining
 - **test**: simulated data for first-step testing of the method
+- **test/benchmarks**: small offline exact/scientific regression benchmarks
 - **versions**: versioning
 - **xcftools**: tools to handle XCF files [experimental]
 

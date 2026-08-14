@@ -1,0 +1,22 @@
+{
+  "common.truth.bcf": {
+    "samples": 128,
+    "variants": 1200,
+    "canonical_gt_sha256": "6bf71788f9081c7e0c1af64deacb9ac71fe68eca0696ba70bf8dc6b8e9ff7bdb"
+  },
+  "common.scaffold.bcf": {
+    "samples": 128,
+    "variants": 300,
+    "canonical_gt_sha256": "326ed2859c6ebe954707188cbe2b90a0e103709f9b83c3cf5b37c155e72fd5f4"
+  },
+  "rare.truth.bcf": {
+    "samples": 128,
+    "variants": 1039,
+    "canonical_gt_sha256": "a67d6aa0b040911177307fc8611ad833aa9cf4a1de7076eaecbce494a7e24fef"
+  },
+  "rare.scaffold.bcf": {
+    "samples": 128,
+    "variants": 120,
+    "canonical_gt_sha256": "0c32b7a4ceaf93282acd51a446f5b549c3f7306daff6f666f2df1f6ab9623bfb"
+  }
+}

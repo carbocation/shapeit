@@ -1,6 +1,6 @@
 projects = phase_common phase_rare switch ligate simulate xcftools
 
-.PHONY: all $(projects)
+.PHONY: all $(projects) benchmark benchmark-unit
 
 all: $(projects)
 
@@ -25,3 +25,8 @@ rgc:
 	$(MAKE) $@ -C $$dir; \
 	done
 
+benchmark:
+	python3 test/benchmarks/run.py --bin-dir .
+
+benchmark-unit:
+	python3 -m unittest discover -s test/benchmarks/tests -v
