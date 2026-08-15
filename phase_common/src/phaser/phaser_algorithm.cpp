@@ -44,8 +44,7 @@ void phaser::phaseWindow(int id_worker, int id_job) {
 	random_number_generator window_rng = rng.fork(RNG_DOMAIN_PHASE_COMMON_WINDOW, iteration_index, id_job);
 	random_number_generator sample_rng = rng.fork(RNG_DOMAIN_PHASE_COMMON_MCMC, iteration_index, id_job);
 	random_number_generator fallback_rng = rng.fork(RNG_DOMAIN_PHASE_COMMON_FALLBACK, iteration_index, id_job);
-	threadData[id_worker].make(id_job, options["hmm-window"].as < double > (), window_rng, fallback_rng,
-		options["pbwt-state-cap"].as < int > ());
+	threadData[id_worker].make(id_job, options["hmm-window"].as < double > (), window_rng, fallback_rng);
 	int underflow_recovered_summing = 0;
 	int underflow_recovered_precision = 0;
 

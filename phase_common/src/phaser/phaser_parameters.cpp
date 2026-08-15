@@ -57,8 +57,7 @@ void phaser::declare_options() {
 			("pbwt-depth", bpo::value < int >()->default_value(4), "Depth of PBWT indexes to condition on (default 4)")
 			("pbwt-mac", bpo::value < int >()->default_value(5), "Minimal Minor Allele Count at which PBWT is evaluated (default 5)")
 			("pbwt-mdr", bpo::value < double >()->default_value(0.1), "Maximal Missing Data Rate at which PBWT is evaluated (default 10%)")
-			("pbwt-window", bpo::value < double >()->default_value(4), "Run PBWT selection in windows of this size (default 4cM)")
-			("pbwt-state-cap", bpo::value < int >()->default_value(0), "Keep at most this many support-ranked HMM conditioning states (0 disables; may change results)");
+			("pbwt-window", bpo::value < double >()->default_value(4), "Run PBWT selection in windows of this size (default 4cM)");
 	
 	bpo::options_description opt_hmm ("HMM parameters");
 	opt_hmm.add_options()
@@ -127,9 +126,6 @@ void phaser::check_options() {
 	if (!options["pbwt-window"].defaulted() && (options["pbwt-window"].as < double > () < 0.5 || options["pbwt-window"].as < double > () > 10))
 		vrb.error("You must specify a PBWT window size comprised between 0.5 and 10 cM");
 
-	if (options["pbwt-state-cap"].as < int > () == 1 || options["pbwt-state-cap"].as < int > () < 0)
-		vrb.error("PBWT state cap must be 0 (disabled) or at least 2");
-
 	string oformat = options["output-format"].as < string > ();
 	if (oformat != "graph" && oformat != "vcf" && oformat != "bh")
 		vrb.error("Output format[" + oformat + "] unsupported, use [graph, vcf or bh] instead");
@@ -162,8 +158,6 @@ void phaser::verbose_options() {
 		vrb.bullet("PBWT    : [window = " + stb.str(options["pbwt-window"].as < double > ()) + "cM / depth = " + stb.str(options["pbwt-depth"].as < int > ()) + " / modulo = " + stb.str(options["pbwt-modulo"].as < double > ()) + " / mac = " + stb.str(options["pbwt-mac"].as < int > ()) + " / missing = " + stb.str(options["pbwt-mdr"].as < double > ()) + "]");
 	else
 		vrb.bullet("PBWT    : [window = " + stb.str(options["pbwt-window"].as < double > ()) + "cM / depth = auto / modulo = auto / mac = " + stb.str(options["pbwt-mac"].as < int > ()) + " / missing = " + stb.str(options["pbwt-mdr"].as < double > ()) + "]");
-	if (options["pbwt-state-cap"].as < int > () > 0)
-		vrb.bullet("PBWT cap: [states = " + stb.str(options["pbwt-state-cap"].as < int > ()) + " / ranking = local support]");
 
 	if (options.count("map"))  vrb.bullet("HMM     : [window = " + stb.str(options["hmm-window"].as < double > ()) + "cM / Ne = " + stb.str(options["hmm-ne"].as < int > ()) + " / Recombination rates given by genetic map]");
 	else vrb.bullet("HMM     : [window = " + stb.str(options["hmm-window"].as < double > ()) + "cM / Ne = " + stb.str(options["hmm-ne"].as < int > ()) + " / Constant recombination rate of 1cM per Mb]");

@@ -33,7 +33,6 @@ compute_job::compute_job(variant_map & _V, genotype_set & _G, conditioning_set &
 	Ordering = vector < unsigned int > (H.n_hap);
 	iota(Ordering.begin(), Ordering.end(), 0);
 	Seen = vector < uint32_t > (H.n_hap, 0);
-	StateSupport = vector < uint32_t > (H.n_hap, 0);
 	seen_epoch = 0;
 }
 
@@ -46,13 +45,11 @@ void compute_job::free () {
 	vector < float > ().swap(M);
 	vector < vector < unsigned int > > ().swap(Kstates);
 	vector < uint32_t > ().swap(Seen);
-	vector < uint32_t > ().swap(StateSupport);
 	Kbanned.clear();
 	Windows.clear();
 }
 
-void compute_job::make(unsigned int ind, double min_window_size, random_number_generator & job_rng,
-	random_number_generator & fallback_rng, unsigned int max_conditioning_states) {
+void compute_job::make(unsigned int ind, double min_window_size, random_number_generator & job_rng, random_number_generator & fallback_rng) {
 	//1. Mapping coordinates of each segment
 	int n_windows = Windows.build (V, G.vecG[ind], min_window_size, job_rng);
 
@@ -70,20 +67,13 @@ void compute_job::make(unsigned int ind, double min_window_size, random_number_g
 				for (int s = 0 ; s < H.depth ; s ++) {
 					int cond_hap0 = H.indexes_pbwt_neighbour[s * addr_offset + curr_hap0 * H.sites_pbwt_ngroups + H.sites_pbwt_grouping[l]];
 					int cond_hap1 = H.indexes_pbwt_neighbour[s * addr_offset + curr_hap1 * H.sites_pbwt_ngroups + H.sites_pbwt_grouping[l]];
-					const uint32_t support = H.depth - s;
-					if (cond_hap0 >= 0) {
-						if (Seen[cond_hap0] != seen_epoch) {
-							Seen[cond_hap0] = seen_epoch;
-							StateSupport[cond_hap0] = support;
-							Kstates[w].push_back(cond_hap0);
-						} else StateSupport[cond_hap0] += support;
+					if (cond_hap0 >= 0 && Seen[cond_hap0] != seen_epoch) {
+						Seen[cond_hap0] = seen_epoch;
+						Kstates[w].push_back(cond_hap0);
 					}
-					if (cond_hap1 >= 0) {
-						if (Seen[cond_hap1] != seen_epoch) {
-							Seen[cond_hap1] = seen_epoch;
-							StateSupport[cond_hap1] = support;
-							Kstates[w].push_back(cond_hap1);
-						} else StateSupport[cond_hap1] += support;
+					if (cond_hap1 >= 0 && Seen[cond_hap1] != seen_epoch) {
+						Seen[cond_hap1] = seen_epoch;
+						Kstates[w].push_back(cond_hap1);
 					}
 				}
 			}
@@ -122,19 +112,6 @@ void compute_job::make(unsigned int ind, double min_window_size, random_number_g
 
 			Kstates[w] = std::move(Ktmp);
 		}
-	}
-
-	//PBWT neighbours recurring across sites and at shallower ranks carry the
-	//strongest local matching evidence. Bound dense-window HMM work by keeping
-	//the best-supported states, with haplotype index as a deterministic tie-break.
-	for (int w = 0 ; w < n_windows ; ++w) if (max_conditioning_states && Kstates[w].size() > max_conditioning_states) {
-		partial_sort(Kstates[w].begin(), Kstates[w].begin() + max_conditioning_states, Kstates[w].end(),
-			[&](const unsigned int lhs, const unsigned int rhs) {
-				return StateSupport[lhs] != StateSupport[rhs]
-					? StateSupport[lhs] > StateSupport[rhs] : lhs < rhs;
-			});
-		Kstates[w].resize(max_conditioning_states);
-		sort(Kstates[w].begin(), Kstates[w].end());
 	}
 
 	//4. Protect for #states = 0
