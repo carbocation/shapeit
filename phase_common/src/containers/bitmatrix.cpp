@@ -34,16 +34,25 @@ static void subset_transpose_bmi2(const bitmatrix & source, const vector < unsig
 	uint32_t source_byte_first, uint32_t source_byte_count, unsigned char * target, uint32_t target_stride) {
 	const uint64_t source_stride = source.n_cols >> 3;
 	union { uint64_t word; uint8_t bytes[8]; } packed;
-	for (uint32_t row = 0 ; row < ROUND8(rows.size()) ; row += 8) {
-		for (uint32_t byte = 0 ; byte < source_byte_count ; ++byte) {
-			for (uint32_t lane = 0 ; lane < 8 ; ++lane) {
-				packed.bytes[7 - lane] = row + lane < rows.size()
-					? source.bytes[static_cast<uint64_t>(rows[row + lane]) * source_stride + source_byte_first + byte]
-					: 0;
-			}
-			for (uint32_t bit = 0 ; bit < 8 ; ++bit) {
-				target[static_cast<uint64_t>((byte << 3) + bit) * target_stride + (row >> 3)] =
-					static_cast<uint8_t>(_pext_u64(packed.word, 0x8080808080808080ULL >> bit));
+	const uint32_t row_count = ROUND8(rows.size());
+	//Keep both sides of the scattered transpose resident: a 64x64-bit tile
+	//touches roughly 4 KiB of source lines and 4 KiB of target lines.
+	for (uint32_t row_block = 0 ; row_block < row_count ; row_block += 64) {
+		const uint32_t row_stop = std::min(row_block + 64, row_count);
+		for (uint32_t byte_block = 0 ; byte_block < source_byte_count ; byte_block += 8) {
+			const uint32_t byte_stop = std::min(byte_block + 8, source_byte_count);
+			for (uint32_t row = row_block ; row < row_stop ; row += 8) {
+				for (uint32_t byte = byte_block ; byte < byte_stop ; ++byte) {
+					for (uint32_t lane = 0 ; lane < 8 ; ++lane) {
+						packed.bytes[7 - lane] = row + lane < rows.size()
+							? source.bytes[static_cast<uint64_t>(rows[row + lane]) * source_stride + source_byte_first + byte]
+							: 0;
+					}
+					for (uint32_t bit = 0 ; bit < 8 ; ++bit) {
+						target[static_cast<uint64_t>((byte << 3) + bit) * target_stride + (row >> 3)] =
+							static_cast<uint8_t>(_pext_u64(packed.word, 0x8080808080808080ULL >> bit));
+					}
+				}
 			}
 		}
 	}
