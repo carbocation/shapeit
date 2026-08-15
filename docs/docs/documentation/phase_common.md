@@ -143,13 +143,9 @@ count.
 
 | Option name 	      | Argument| Default              | Description |
 |:--------------------|:--------|:---------------------|:-------------------------------------|
-| \-\-mcmc-iterations | STRING  | 1b,1p,5m             | Iteration scheme of the MCMC (burnin=b, pruning=p, main=m) |
+| \-\-mcmc-iterations | STRING  | 5b,1p,1b,1p,1b,1p,5m | Iteration scheme of the MCMC (burnin=b, pruning=p, main=m) |
 | \-\-mcmc-prune      | FLOAT   | 0.999                | Pruning threshold for genotype graphs (internal memory structures)  |
 | \-\-mcmc-noinit     | NA      | NA                   | If specified, phasing initialization by PBWT sweep is disabled |
-
-The former conservative schedule remains available as
-`--mcmc-iterations 5b,1p,1b,1p,1b,1p,5m` for replication of runs made with
-earlier releases.
 
 #### PBWT parameters [Expert]
 

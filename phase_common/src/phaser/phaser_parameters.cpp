@@ -47,7 +47,7 @@ void phaser::declare_options() {
 
 	bpo::options_description opt_mcmc ("MCMC parameters");
 	opt_mcmc.add_options()
-			("mcmc-iterations", bpo::value<string>()->default_value("1b,1p,5m"), "Iteration scheme of the MCMC")
+			("mcmc-iterations", bpo::value<string>()->default_value("5b,1p,1b,1p,1b,1p,5m"), "Iteration scheme of the MCMC")
 			("mcmc-prune", bpo::value < double >()->default_value(0.999), "Pruning threshold for genotype graphs")
 			("mcmc-noinit", "Disable phasing initialization by PBWT sweep");
 
