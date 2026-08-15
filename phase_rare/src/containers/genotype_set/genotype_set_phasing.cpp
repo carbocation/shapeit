@@ -27,29 +27,36 @@ using namespace std;
 void genotype_set::phaseLiAndStephens(uint32_t vr, uint32_t hap, aligned_vector32 < float > & alphaXbeta_prev, aligned_vector32 < float > & alphaXbeta_curr, vector < uint32_t > & H, float threshold) {
 	float p[2] = { 0.0f };
 
-	int32_t tidx = -1;
-	for (int32_t k = 0, r = 0; (k<H.size()) || (r<GRvar_genotypes[vr].size()) ;) {
-		int32_t tind = (r<GRvar_genotypes[vr].size())?GRvar_genotypes[vr][r].idx:-1;
-		int32_t tmis = (r<GRvar_genotypes[vr].size())?GRvar_genotypes[vr][r].mis:-1;
-		int32_t cind = (k<H.size())?H[k]/2:-1;
+	thread_local vector < uint32_t > carrier_epoch;
+	thread_local vector < uint8_t > carrier_state;
+	thread_local uint32_t current_epoch = 0;
+	if (carrier_epoch.size() != n_samples) {
+		carrier_epoch.assign(n_samples, 0);
+		carrier_state.resize(n_samples);
+		current_epoch = 0;
+	}
+	if (++current_epoch == 0) {
+		fill(carrier_epoch.begin(), carrier_epoch.end(), 0);
+		current_epoch = 1;
+	}
 
-		if (tind == hap/2) {
-			tidx = r;
-			r++;
-		} else if (tind < 0) {
-			p[major_alleles[vr]] += alphaXbeta_prev[k] * 0.5f + alphaXbeta_curr[k] * 0.5f;
-			k++;
-		} else if (cind < 0) {
-			r++;
-		} else if (tind < cind) {
-			r++;
-		} else if (tind==cind) {
-			if (!tmis) p[!major_alleles[vr]] += alphaXbeta_prev[k] * 0.5f + alphaXbeta_curr[k] * 0.5f;
-			k++;
-		} else {
-			p[major_alleles[vr]] += alphaXbeta_prev[k] * 0.5f + alphaXbeta_curr[k] * 0.5f;
-			k++;
+	int32_t tidx = -1;
+	for (uint32_t r = 0 ; r < GRvar_genotypes[vr].size() ; ++r) {
+		const rare_genotype & genotype = GRvar_genotypes[vr][r];
+		if (genotype.idx == hap/2) tidx = r;
+		else {
+			carrier_epoch[genotype.idx] = current_epoch;
+			carrier_state[genotype.idx] = genotype.mis ? 2 : 1;
 		}
+	}
+
+	for (uint32_t k = 0 ; k < H.size() ; ++k) {
+		const float weight = alphaXbeta_prev[k] * 0.5f + alphaXbeta_curr[k] * 0.5f;
+		const uint32_t individual = H[k] >> 1;
+		if (carrier_epoch[individual] != current_epoch)
+			p[major_alleles[vr]] += weight;
+		else if (carrier_state[individual] == 1)
+			p[!major_alleles[vr]] += weight;
 	}
 
 	assert(tidx>=0);

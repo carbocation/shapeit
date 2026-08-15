@@ -74,7 +74,6 @@ public:
 	std::vector < cflip > CF;
 
 	//STATE DATA
-	std::vector < std::pair < uint32_t, uint32_t > > indexes_pbwt_neighbour_serialized;
 	std::vector < std::vector < uint32_t > > indexes_pbwt_neighbour;
 
 	//IBD2 protection
