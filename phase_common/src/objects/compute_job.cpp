@@ -32,6 +32,8 @@ compute_job::compute_job(variant_map & _V, genotype_set & _G, conditioning_set &
 	M = vector < float > (n_max_missing , 0.0);
 	Ordering = vector < unsigned int > (H.n_hap);
 	iota(Ordering.begin(), Ordering.end(), 0);
+	Seen = vector < uint32_t > (H.n_hap, 0);
+	seen_epoch = 0;
 }
 
 compute_job::~compute_job() {
@@ -42,6 +44,7 @@ void compute_job::free () {
 	vector < double > ().swap(T);
 	vector < float > ().swap(M);
 	vector < vector < unsigned int > > ().swap(Kstates);
+	vector < uint32_t > ().swap(Seen);
 	Kbanned.clear();
 	Windows.clear();
 }
@@ -55,19 +58,27 @@ void compute_job::make(unsigned int ind, double min_window_size, random_number_g
 	Kstates = vector < vector < unsigned int > > (n_windows, vector < unsigned int >());
 	unsigned long curr_hap0 = 2*ind+0, curr_hap1 = 2*ind+1;
 	for (int w = 0 ; w < n_windows ; w++) {
-		vector < int > phap = vector < int > (2 * H.depth, -1);
+		if (++seen_epoch == 0) {
+			fill(Seen.begin(), Seen.end(), 0);
+			seen_epoch = 1;
+		}
 		for (int l = Windows.W[w].start_locus ; l <= Windows.W[w].stop_locus ; l++) {
 			if (H.sites_pbwt_selection[l]) {
 				for (int s = 0 ; s < H.depth ; s ++) {
 					int cond_hap0 = H.indexes_pbwt_neighbour[s * addr_offset + curr_hap0 * H.sites_pbwt_ngroups + H.sites_pbwt_grouping[l]];
 					int cond_hap1 = H.indexes_pbwt_neighbour[s * addr_offset + curr_hap1 * H.sites_pbwt_ngroups + H.sites_pbwt_grouping[l]];
-					if ((cond_hap0 >= 0) && (cond_hap0 != phap[2*s+0])) { Kstates[w].push_back(cond_hap0); phap[2*s+0] = cond_hap0; };
-					if ((cond_hap1 >= 0) && (cond_hap1 != phap[2*s+1])) { Kstates[w].push_back(cond_hap1); phap[2*s+1] = cond_hap1; };
+					if (cond_hap0 >= 0 && Seen[cond_hap0] != seen_epoch) {
+						Seen[cond_hap0] = seen_epoch;
+						Kstates[w].push_back(cond_hap0);
+					}
+					if (cond_hap1 >= 0 && Seen[cond_hap1] != seen_epoch) {
+						Seen[cond_hap1] = seen_epoch;
+						Kstates[w].push_back(cond_hap1);
+					}
 				}
 			}
 		}
 		sort(Kstates[w].begin(), Kstates[w].end());
-		Kstates[w].erase(unique(Kstates[w].begin(), Kstates[w].end()), Kstates[w].end());
 	}
 
 	//3. Protect for IBD2
@@ -99,9 +110,7 @@ void compute_job::make(unsigned int ind, double min_window_size, random_number_g
 				else Ktmp.push_back(Kstates[w][k]);
 			}
 
-			sort(Ktmp.begin(), Ktmp.end());
-			Ktmp.erase(unique(Ktmp.begin(), Ktmp.end()), Ktmp.end());
-			Kstates[w] = Ktmp;
+			Kstates[w] = std::move(Ktmp);
 		}
 	}
 

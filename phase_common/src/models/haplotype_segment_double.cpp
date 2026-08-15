@@ -51,9 +51,7 @@ haplotype_segment_double::haplotype_segment_double(genotype * _G, bitmatrix & H,
 		AlphaSumMissing = vector < aligned_vector32 < double > > (n_missing, aligned_vector32 < double > (HAP_NUMBER, 0.0f));
 	}
 	//Cache efficient data transfer for conditioning haplotypes
-	curr_rel_locus_offset = Hhap.subset(H, idxH, locus_first, locus_last);
-	Hvar.allocateFast(Hhap.n_cols, Hhap.n_rows);
-	Hhap.transpose(Hvar);
+	curr_rel_locus_offset = Hvar.subsetTranspose(H, idxH, locus_first, locus_last);
 }
 
 haplotype_segment_double::~haplotype_segment_double() {
@@ -202,11 +200,11 @@ void haplotype_segment_double::SET_FIRST_TRANS(vector < double > & transition_pr
 	double scale = 1.0f / probSumT, scaleDip = 0.0f;
 	unsigned int n_transitions = G->countDiplotypes(G->Diplotypes[0]);
 	vector < double > cprobs = vector < double > (n_transitions, 0.0);
-	for (unsigned int d = 0, t = 0 ; d < 64 ; ++d) {
-		if (DIP_GET(G->Diplotypes[0], d)) {
-			cprobs[t] = (double)(probSumH[DIP_HAP0(d)]*scale) * (double)(probSumH[DIP_HAP1(d)]*scale);
-			scaleDip += cprobs[t++];
-		}
+	unsigned int t = 0;
+	for (unsigned long active = G->Diplotypes[0]; active; active &= active - 1) {
+		const unsigned int d = std::countr_zero(active);
+		cprobs[t] = (double)(probSumH[DIP_HAP0(d)]*scale) * (double)(probSumH[DIP_HAP1(d)]*scale);
+		scaleDip += cprobs[t++];
 	}
 	scaleDip = 1.0f / scaleDip;
 	for (unsigned int t = 0 ; t < n_transitions ; t ++) transition_probabilities[t] = cprobs[t] * scaleDip;

@@ -76,6 +76,37 @@ int bitmatrix::subset(bitmatrix & BM, const vector < unsigned int > & rows, unsi
 	return col_from % 8;
 }
 
+int bitmatrix::subsetTranspose(const bitmatrix & BM, const vector < unsigned int > & rows, unsigned int col_from, unsigned int col_to) {
+	const uint32_t source_byte_first = col_from >> 3;
+	const uint32_t source_byte_count = (col_to >> 3) - source_byte_first + 1;
+	n_rows = source_byte_count << 3;
+	n_cols = ROUND8(rows.size());
+	n_bytes = (n_cols >> 3) * static_cast<unsigned long>(n_rows);
+	bytes = static_cast<unsigned char *>(malloc(n_bytes));
+
+	const uint64_t source_stride = BM.n_cols >> 3;
+	const uint64_t target_stride = n_cols >> 3;
+	union { uint32_t x[2]; uint8_t b[8]; } m4x8d;
+	for (uint32_t row = 0; row < n_cols; row += 8) {
+		for (uint32_t col = 0; col < n_rows; col += 8) {
+			for (uint32_t i = 0; i < 8; ++i) {
+				m4x8d.b[7 - i] = row + i < rows.size()
+					? BM.bytes[static_cast<uint64_t>(rows[row + i]) * source_stride + source_byte_first + (col >> 3)]
+					: 0;
+			}
+			for (uint32_t i = 0; i < 7; ++i) {
+				const uint64_t target = static_cast<uint64_t>(col + i) * target_stride + (row >> 3);
+				bytes[target]  = static_cast<uint8_t>(abracadabra(m4x8d.x[1] & (0x80808080 >> i), (0x02040810 << i)) & 0x0f) << 4;
+				bytes[target] |= static_cast<uint8_t>(abracadabra(m4x8d.x[0] & (0x80808080 >> i), (0x02040810 << i)) & 0x0f);
+			}
+			const uint64_t target = static_cast<uint64_t>(col + 7) * target_stride + (row >> 3);
+			bytes[target]  = static_cast<uint8_t>(abracadabra((m4x8d.x[1] << 7) & 0x80808080, 0x02040810) & 0x0f) << 4;
+			bytes[target] |= static_cast<uint8_t>(abracadabra((m4x8d.x[0] << 7) & 0x80808080, 0x02040810) & 0x0f);
+		}
+	}
+	return col_from & 7;
+}
+
 /*
 void bitmatrix::getMatchHetCount(unsigned int i0, unsigned int i1, unsigned int start, unsigned int stop, int & c1, int & m1) {
 	c1=m1=0;

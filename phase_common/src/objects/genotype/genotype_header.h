@@ -145,7 +145,10 @@ unsigned int genotype::countDiplotypes(unsigned long _dip) {
 
 inline
 void genotype::makeDiplotypes(unsigned long _dip) {
-	for (unsigned int d = 0, i = 0 ; d < 64 ; ++d) if (DIP_GET(_dip, d)) curr_dipcodes[i++] = d;
+	unsigned int i = 0;
+	for (unsigned long active = _dip; active; active &= active - 1) {
+		curr_dipcodes[i++] = std::countr_zero(active);
+	}
 }
 
 inline

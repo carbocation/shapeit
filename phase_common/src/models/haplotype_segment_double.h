@@ -38,7 +38,7 @@ private:
 	//EXTERNAL DATA
 	hmm_parameters & M;
 	genotype * G;
-	bitmatrix Hhap, Hvar;
+	bitmatrix Hvar;
 
 	//COORDINATES & CONSTANTS
 	int segment_first;
@@ -426,15 +426,14 @@ inline
 bool haplotype_segment_double::TRANS_DIP_MULT() {
 	sumDProbs= 0.0f;
 	double scaling = 1.0 / sumHProbs;
-	for (int pd = 0, t = 0 ; pd < 64 ; ++pd) {
-		if (DIP_GET(G->Diplotypes[curr_segment_index-1], pd)) {
-			for (int nd = 0 ; nd < 64 ; ++nd) {
-				if (DIP_GET(G->Diplotypes[curr_segment_index], nd)) {
-					DProbs[t] = (((double)HProbs[DIP_HAP0(pd)*HAP_NUMBER+DIP_HAP0(nd)]) * scaling) * ((double)(HProbs[DIP_HAP1(pd)*HAP_NUMBER+DIP_HAP1(nd)]) * scaling);
-					sumDProbs += DProbs[t];
-					t++;
-				}
-			}
+	int t = 0;
+	for (unsigned long prev = G->Diplotypes[curr_segment_index-1]; prev; prev &= prev - 1) {
+		const int pd = std::countr_zero(prev);
+		for (unsigned long next = G->Diplotypes[curr_segment_index]; next; next &= next - 1) {
+			const int nd = std::countr_zero(next);
+			DProbs[t] = (((double)HProbs[DIP_HAP0(pd)*HAP_NUMBER+DIP_HAP0(nd)]) * scaling) * ((double)(HProbs[DIP_HAP1(pd)*HAP_NUMBER+DIP_HAP1(nd)]) * scaling);
+			sumDProbs += DProbs[t];
+			t++;
 		}
 	}
 	return (std::isnan(sumDProbs) || std::isinf(sumDProbs) || sumDProbs < std::numeric_limits<double>::min());
@@ -444,15 +443,14 @@ inline
 bool haplotype_segment_double::TRANS_DIP_ADD() {
 	sumDProbs = 0.0f;
 	double scaling = 1.0 / sumHProbs;
-	for (int pd = 0, t = 0 ; pd < 64 ; ++pd) {
-		if (DIP_GET(G->Diplotypes[curr_segment_index-1], pd)) {
-			for (int nd = 0 ; nd < 64 ; ++nd) {
-				if (DIP_GET(G->Diplotypes[curr_segment_index], nd)) {
-					DProbs[t] = DProbs[t] = (((double)HProbs[DIP_HAP0(pd)*HAP_NUMBER+DIP_HAP0(nd)]) * scaling) + ((double)(HProbs[DIP_HAP1(pd)*HAP_NUMBER+DIP_HAP1(nd)]) * scaling);
-					sumDProbs += DProbs[t];
-					t++;
-				}
-			}
+	int t = 0;
+	for (unsigned long prev = G->Diplotypes[curr_segment_index-1]; prev; prev &= prev - 1) {
+		const int pd = std::countr_zero(prev);
+		for (unsigned long next = G->Diplotypes[curr_segment_index]; next; next &= next - 1) {
+			const int nd = std::countr_zero(next);
+			DProbs[t] = (((double)HProbs[DIP_HAP0(pd)*HAP_NUMBER+DIP_HAP0(nd)]) * scaling) + ((double)(HProbs[DIP_HAP1(pd)*HAP_NUMBER+DIP_HAP1(nd)]) * scaling);
+			sumDProbs += DProbs[t];
+			t++;
 		}
 	}
 	return (std::isnan(sumDProbs) || std::isinf(sumDProbs) || sumDProbs < std::numeric_limits<double>::min());
