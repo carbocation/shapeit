@@ -550,26 +550,21 @@ bool haplotype_segment_single::TRANS_HAP() {
 	const float * __restrict alpha_data = Alpha[curr_rel_segment_index-1].data();
 	const float * __restrict alpha_sums = AlphaSum[curr_rel_segment_index-1].data();
 	const float * __restrict beta_data = prob.data();
-	for (int h1 = 0 ; h1 < HAP_NUMBER ; h1++) {
-		__m256 _sums[8] = {_mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(),
-			_mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps()};
-		const float fact2 = (alpha_sums[h1] / alpha_total) * yt / n_cond_haps;
-		int k = 0;
-		for ( ; k + 7 < n_cond_haps ; k += 8) {
-			#pragma GCC unroll 8
-			for (int lane = 0 ; lane < 8 ; ++lane) {
-				__m256 _alpha = _mm256_set1_ps(alpha_data[(k+lane)*HAP_NUMBER + h1] * fact1 + fact2);
-				__m256 _beta = _mm256_load_ps(beta_data + (k+lane)*HAP_NUMBER);
-				_sums[lane] = _mm256_add_ps(_sums[lane], _mm256_mul_ps(_alpha, _beta));
-			}
+	__m256 _sums[HAP_NUMBER] = {_mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(),
+		_mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps()};
+	float fact2[HAP_NUMBER];
+	for (int h1 = 0 ; h1 < HAP_NUMBER ; ++h1)
+		fact2[h1] = (alpha_sums[h1] / alpha_total) * yt / n_cond_haps;
+	for (int k = 0 ; k < n_cond_haps ; ++k) {
+		const __m256 _beta = _mm256_load_ps(beta_data + k*HAP_NUMBER);
+		#pragma GCC unroll 8
+		for (int h1 = 0 ; h1 < HAP_NUMBER ; ++h1) {
+			const __m256 _alpha = _mm256_set1_ps(alpha_data[k*HAP_NUMBER + h1] * fact1 + fact2[h1]);
+			_sums[h1] = _mm256_fmadd_ps(_alpha, _beta, _sums[h1]);
 		}
-		for ( ; k < n_cond_haps ; ++k) {
-			__m256 _alpha = _mm256_set1_ps(alpha_data[k*HAP_NUMBER + h1] * fact1 + fact2);
-			__m256 _beta = _mm256_load_ps(beta_data + k*HAP_NUMBER);
-			_sums[0] = _mm256_add_ps(_sums[0], _mm256_mul_ps(_alpha, _beta));
-		}
-		__m256 _sum = haplotype_sum8_ps(_sums);
-		_mm256_store_ps(&HProbs[h1*HAP_NUMBER], _sum);
+	}
+	for (int h1 = 0 ; h1 < HAP_NUMBER ; ++h1) {
+		_mm256_store_ps(&HProbs[h1*HAP_NUMBER], _sums[h1]);
 		sumHProbs += HProbs[h1*HAP_NUMBER+0]+HProbs[h1*HAP_NUMBER+1]+HProbs[h1*HAP_NUMBER+2]+HProbs[h1*HAP_NUMBER+3]+HProbs[h1*HAP_NUMBER+4]+HProbs[h1*HAP_NUMBER+5]+HProbs[h1*HAP_NUMBER+6]+HProbs[h1*HAP_NUMBER+7];
 	}
 	return (std::isnan(sumHProbs) || std::isinf(sumHProbs) || sumHProbs < std::numeric_limits<float>::min());
