@@ -1,8 +1,20 @@
-# SHAPEIT RNG ABI
+# SHAPEIT Rust ABI
 
-The `shapeit-rng` Rust static library provides SHAPEIT's versioned,
-counter-based random-number kernel. It does not allocate, retain mutable global
-state, or own any phasing data.
+The `shapeit-rng` Rust static library provides versioned low-level kernels for
+SHAPEIT. It does not allocate, retain mutable global state, or own any phasing
+data. The first two ABIs are the counter-based random-number kernel and the
+checked subset-transpose operation used by the common-variant HMM.
+
+## Bitmatrix subset transpose
+
+`shapeit_bitmatrix_subset_transpose_v1` selects an arbitrary list of rows from
+a row-major bitmatrix and transposes a contiguous byte span into the layout
+consumed by the HMM. Rust validates dimensions, index bounds, and integer
+arithmetic before writing the caller-owned output buffer. On x86-64 it performs
+runtime BMI2 detection and uses a tiled `PEXT` kernel; other targets use the
+portable byte-exact implementation.
+
+## Random-number generation
 
 ABI version 1 uses Philox4x32-10. A random block is a pure function of:
 

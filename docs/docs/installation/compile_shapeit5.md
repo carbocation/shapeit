@@ -35,7 +35,7 @@ You'll find there a folder containing all the software packages are other utilit
 - **ligate**: ligate multiple phased BCF/VCF files into a chromosome length file
 - **phase_common**: phase common sites, typically SNP array data
 - **phase_rare**: phase rare variants onto a scaffold of common variants
-- **rng**: versioned Rust/Philox random-number kernel, built automatically
+- **rng**: versioned Rust RNG and bitmatrix kernels, built automatically
 - **resources**: genetics maps [b37/b38] and coordinates for [5/20] cM chunks  
 - **static_bins**: static binaries of all executables
 - **switch**: compute switch error rate and genotyping error rate given simulated or trio data

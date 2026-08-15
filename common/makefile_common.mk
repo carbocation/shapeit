@@ -14,7 +14,7 @@ LDFLAG=-O3
 RNG_DIR=../rng
 RNG_LIB=$(RNG_DIR)/target/release/libshapeit_rng.a
 RNG_SOURCE=$(RNG_DIR)/Cargo.toml $(RNG_DIR)/Cargo.lock $(shell find $(RNG_DIR)/src -name '*.rs')
-RNG_HEADERS=$(RNG_DIR)/include/shapeit_rng.h
+RNG_HEADERS=$(wildcard $(RNG_DIR)/include/*.h)
 CXXFLAG+= -I$(RNG_DIR)/include
 
 #COMMIT TRACING

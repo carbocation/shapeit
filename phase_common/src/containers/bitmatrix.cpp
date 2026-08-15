@@ -21,43 +21,10 @@
  ******************************************************************************/
 
 #include <containers/bitmatrix.h>
-
-#if defined(__x86_64__) || defined(__i386__)
-#include <immintrin.h>
-#endif
+#include <shapeit_bitmatrix.h>
+#include <stdexcept>
 
 using namespace std;
-
-#if defined(__x86_64__) || defined(__i386__)
-__attribute__((target("bmi2")))
-static void subset_transpose_bmi2(const bitmatrix & source, const vector < unsigned int > & rows,
-	uint32_t source_byte_first, uint32_t source_byte_count, unsigned char * target, uint32_t target_stride) {
-	const uint64_t source_stride = source.n_cols >> 3;
-	union { uint64_t word; uint8_t bytes[8]; } packed;
-	const uint32_t row_count = ROUND8(rows.size());
-	//Keep both sides of the scattered transpose resident: a 64x64-bit tile
-	//touches roughly 4 KiB of source lines and 4 KiB of target lines.
-	for (uint32_t row_block = 0 ; row_block < row_count ; row_block += 64) {
-		const uint32_t row_stop = std::min(row_block + 64, row_count);
-		for (uint32_t byte_block = 0 ; byte_block < source_byte_count ; byte_block += 8) {
-			const uint32_t byte_stop = std::min(byte_block + 8, source_byte_count);
-			for (uint32_t row = row_block ; row < row_stop ; row += 8) {
-				for (uint32_t byte = byte_block ; byte < byte_stop ; ++byte) {
-					for (uint32_t lane = 0 ; lane < 8 ; ++lane) {
-						packed.bytes[7 - lane] = row + lane < rows.size()
-							? source.bytes[static_cast<uint64_t>(rows[row + lane]) * source_stride + source_byte_first + byte]
-							: 0;
-					}
-					for (uint32_t bit = 0 ; bit < 8 ; ++bit) {
-						target[static_cast<uint64_t>((byte << 3) + bit) * target_stride + (row >> 3)] =
-							static_cast<uint8_t>(_pext_u64(packed.word, 0x8080808080808080ULL >> bit));
-					}
-				}
-			}
-		}
-	}
-}
-#endif
 
 static unsigned char nbit_set[256] = { 0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4, 1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5, 1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5, 2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6, 1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5, 2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6, 2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6, 3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7, 1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5, 2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6, 2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6, 3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7, 2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6, 3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7, 3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7, 4, 5, 5, 6, 5, 6, 6, 7, 5, 6, 6, 7, 6, 7, 7, 8 };
 
@@ -121,29 +88,15 @@ int bitmatrix::subsetTranspose(const bitmatrix & BM, const vector < unsigned int
 
 	const uint64_t source_stride = BM.n_cols >> 3;
 	const uint64_t target_stride = n_cols >> 3;
-	#if defined(__x86_64__) || defined(__i386__)
-	if (__builtin_cpu_supports("bmi2")) {
-		subset_transpose_bmi2(BM, rows, source_byte_first, source_byte_count, bytes, target_stride);
-		return col_from & 7;
-	}
-	#endif
-	union { uint32_t x[2]; uint8_t b[8]; } m4x8d;
-	for (uint32_t row = 0; row < n_cols; row += 8) {
-		for (uint32_t col = 0; col < n_rows; col += 8) {
-			for (uint32_t i = 0; i < 8; ++i) {
-				m4x8d.b[7 - i] = row + i < rows.size()
-					? BM.bytes[static_cast<uint64_t>(rows[row + i]) * source_stride + source_byte_first + (col >> 3)]
-					: 0;
-			}
-			for (uint32_t i = 0; i < 7; ++i) {
-				const uint64_t target = static_cast<uint64_t>(col + i) * target_stride + (row >> 3);
-				bytes[target]  = static_cast<uint8_t>(abracadabra(m4x8d.x[1] & (0x80808080 >> i), (0x02040810 << i)) & 0x0f) << 4;
-				bytes[target] |= static_cast<uint8_t>(abracadabra(m4x8d.x[0] & (0x80808080 >> i), (0x02040810 << i)) & 0x0f);
-			}
-			const uint64_t target = static_cast<uint64_t>(col + 7) * target_stride + (row >> 3);
-			bytes[target]  = static_cast<uint8_t>(abracadabra((m4x8d.x[1] << 7) & 0x80808080, 0x02040810) & 0x0f) << 4;
-			bytes[target] |= static_cast<uint8_t>(abracadabra((m4x8d.x[0] << 7) & 0x80808080, 0x02040810) & 0x0f);
-		}
+	const uint32_t status = shapeit_bitmatrix_subset_transpose_v1(
+		BM.bytes, BM.n_bytes, source_stride, rows.data(), rows.size(),
+		source_byte_first, source_byte_count, bytes, n_bytes, target_stride);
+	if (status != SHAPEIT_BITMATRIX_STATUS_OK) {
+		free(bytes);
+		bytes = NULL;
+		n_rows = n_cols = n_bytes = 0;
+		throw runtime_error("Rust subset-transpose rejected the bitmatrix layout (status " +
+			to_string(status) + ")");
 	}
 	return col_from & 7;
 }

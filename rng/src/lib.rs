@@ -1,5 +1,7 @@
 #![cfg_attr(not(test), no_std)]
 
+mod bitmatrix;
+
 #[cfg(not(test))]
 use core::panic::PanicInfo;
 
