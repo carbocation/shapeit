@@ -25,10 +25,6 @@
 
 #include <utils/otools.h>
 
-inline static uint32_t abracadabra(const uint32_t &i1, const uint32_t &i2) {
-	return static_cast<uint32_t>((static_cast<uint64_t>(i1) * static_cast<uint64_t>(i2)) >> 32);
-}
-
 class bitmatrix	{
 public:
 	unsigned long int n_bytes, n_cols, n_rows, startAddr;

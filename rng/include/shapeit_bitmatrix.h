@@ -30,6 +30,17 @@ uint32_t shapeit_bitmatrix_subset_transpose_v1(
     size_t target_length,
     size_t target_stride);
 
+uint32_t shapeit_bitmatrix_transpose_v1(
+    const uint8_t * source,
+    size_t source_length,
+    size_t source_rows,
+    size_t source_stride,
+    size_t max_rows,
+    size_t max_cols,
+    uint8_t * target,
+    size_t target_length,
+    size_t target_stride);
+
 #ifdef __cplusplus
 }
 #endif

@@ -251,35 +251,15 @@ void bitmatrix::allocateFast(unsigned int nrow, unsigned int ncol) {
 }
 
 
-/*
- * This algorithm for transposing bit matrices is adapted from the code of Timur Kristóf
- * Timur Kristóf: https://github.com/venemo
- * Original version of the code (MIT license): https://github.com/Venemo/fecmagic/blob/master/src/binarymatrix.h
- * Of note, function abracadabra is the same than getMultiplyUpperPart function in the original code from Timur Kristóf.
- */
 void bitmatrix::transpose(bitmatrix & BM, unsigned int _max_row, unsigned int _max_col) {
-	//unsigned int max_row = _max_row + ((_max_row%8)?(8-(_max_row%8)):0);
-	//unsigned int max_col = _max_col + ((_max_col%8)?(8-(_max_col%8)):0);
-	uint32_t max_row = ROUND8(_max_row);
-	uint32_t max_col = ROUND8(_max_col);
-
-	uint64_t targetAddr, sourceAddr;
-	union { uint32_t x[2]; uint8_t b[8]; } m4x8d;
-	for (uint32_t row = 0; row < max_row; row += 8) {
-		for (uint32_t col = 0; col < max_col; col += 8) {
-			for (uint32_t i = 0; i < 8; i++) {
-				sourceAddr = (row+i) * ((uint64_t)(n_cols/8)) + col/8;
-				m4x8d.b[7 - i] = this->bytes[sourceAddr];
-			}
-			for (uint32_t i = 0; i < 7; i++) {
-				targetAddr = ((col+i) * ((uint64_t)(n_rows/8)) + (row) / 8);
-				BM.bytes[targetAddr]  = static_cast<uint8_t>(abracadabra(m4x8d.x[1] & (0x80808080 >> i), (0x02040810 << i)) & 0x0f) << 4;
-                BM.bytes[targetAddr] |= static_cast<uint8_t>(abracadabra(m4x8d.x[0] & (0x80808080 >> i), (0x02040810 << i)) & 0x0f) << 0;
-			}
-			targetAddr = ((col+7) * ((uint64_t)(n_rows/8)) + (row) / 8);
-			BM.bytes[targetAddr]  = static_cast<uint8_t>(abracadabra((m4x8d.x[1] << 7) & (0x80808080 >> 0), (0x02040810 << 0)) & 0x0f) << 4;
-            BM.bytes[targetAddr] |= static_cast<uint8_t>(abracadabra((m4x8d.x[0] << 7) & (0x80808080 >> 0), (0x02040810 << 0)) & 0x0f) << 0;
-		}
+	const uint32_t max_row = ROUND8(_max_row);
+	const uint32_t max_col = ROUND8(_max_col);
+	const uint32_t status = shapeit_bitmatrix_transpose_v1(
+		bytes, n_bytes, n_rows, n_cols >> 3, max_row, max_col,
+		BM.bytes, BM.n_bytes, BM.n_cols >> 3);
+	if (status != SHAPEIT_BITMATRIX_STATUS_OK) {
+		throw runtime_error("Rust transpose rejected the bitmatrix layout (status " +
+			to_string(status) + ")");
 	}
 }
 

@@ -2,17 +2,19 @@
 
 The `shapeit-rng` Rust static library provides versioned low-level kernels for
 SHAPEIT. It does not allocate, retain mutable global state, or own any phasing
-data. The first two ABIs are the counter-based random-number kernel and the
-checked subset-transpose operation used by the common-variant HMM.
+data. Its first ABIs are the counter-based random-number kernel and checked
+bitmatrix transpose operations used by the common-variant HMM.
 
-## Bitmatrix subset transpose
+## Bitmatrix transpose
 
 `shapeit_bitmatrix_subset_transpose_v1` selects an arbitrary list of rows from
 a row-major bitmatrix and transposes a contiguous byte span into the layout
-consumed by the HMM. Rust validates dimensions, index bounds, and integer
-arithmetic before writing the caller-owned output buffer. On x86-64 it performs
-runtime BMI2 detection and uses a tiled `PEXT` kernel; other targets use the
-portable byte-exact implementation.
+consumed by the HMM. `shapeit_bitmatrix_transpose_v1` transposes an aligned
+rectangle between the persistent horizontal and vertical haplotype layouts,
+without changing bytes outside that rectangle. Rust validates dimensions,
+index bounds, and integer arithmetic before writing caller-owned output. On
+x86-64 both operations perform runtime BMI2 detection and use tiled `PEXT`
+kernels; other targets use portable byte-exact implementations.
 
 ## Random-number generation
 
