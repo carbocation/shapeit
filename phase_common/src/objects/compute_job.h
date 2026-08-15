@@ -52,13 +52,14 @@ public:
 	//Random states
 	std::vector < unsigned int > Ordering;
 	std::vector < uint32_t > Seen;
+	std::vector < uint32_t > StateSupport;
 	uint32_t seen_epoch;
 
 	compute_job(variant_map & , genotype_set & , conditioning_set & , unsigned int n_max_transitions , unsigned int n_max_missing);
 	~compute_job();
 
 	void free();
-	void make(unsigned int, double, random_number_generator &, random_number_generator &);
+	void make(unsigned int, double, random_number_generator &, random_number_generator &, unsigned int);
 	unsigned int size();
 };
 

@@ -156,6 +156,7 @@ count.
 | \-\-pbwt-mac        | INT     | 5         | Minimal Minor Allele Count at which PBWT is evaluated |
 | \-\-pbwt-mdr        | FLOAT   | 0.1       | Maximal Missing Data Rate at which PBWT is evaluated |
 | \-\-pbwt-window     | INT     | 4         | Run PBWT selection in windows of this size |
+| \-\-pbwt-state-cap  | INT     | 0         | Maximum support-ranked conditioning states per HMM window. Zero preserves the full set; a positive cap is an opt-in speed/accuracy tradeoff that can change results. |
 
 #### HMM parameters [Expert]
 
