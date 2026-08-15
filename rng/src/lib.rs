@@ -1,9 +1,5 @@
-#![cfg_attr(not(test), no_std)]
-
 mod bitmatrix;
-
-#[cfg(not(test))]
-use core::panic::PanicInfo;
+mod hmm;
 
 const ABI_VERSION: u32 = 1;
 
@@ -12,14 +8,6 @@ const PHILOX_M1: u32 = 0xCD9E_8D57;
 const PHILOX_W0: u32 = 0x9E37_79B9;
 const PHILOX_W1: u32 = 0xBB67_AE85;
 const PHILOX_ROUNDS: usize = 10;
-
-#[cfg(not(test))]
-#[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
-}
 
 #[inline]
 fn multiply_high_low(lhs: u32, rhs: u32) -> (u32, u32) {

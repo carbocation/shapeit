@@ -13,7 +13,7 @@ LDFLAG=-O3
 # VERSIONED RANDOM-NUMBER KERNEL
 RNG_DIR=../rng
 RNG_LIB=$(RNG_DIR)/target/release/libshapeit_rng.a
-RNG_SOURCE=$(RNG_DIR)/Cargo.toml $(RNG_DIR)/Cargo.lock $(shell find $(RNG_DIR)/src -name '*.rs')
+RNG_SOURCE=$(RNG_DIR)/Cargo.toml $(RNG_DIR)/Cargo.lock $(wildcard $(RNG_DIR)/.cargo/config.toml) $(shell find $(RNG_DIR)/src -name '*.rs')
 RNG_HEADERS=$(wildcard $(RNG_DIR)/include/*.h)
 CXXFLAG+= -I$(RNG_DIR)/include
 
@@ -174,7 +174,7 @@ $(EXEFILE): $(OFILE) $(RNG_LIB)
 	$(CXX) $(LDFLAG) -static -static-libgcc -static-libstdc++ -pthread -o $(EXEFILE) $^ $(HTSLIB_LIB) $(BOOST_LIB_IO) $(BOOST_LIB_PO) -Wl,-Bstatic $(DYN_LIBS_FOR_STATIC)
 
 $(RNG_LIB): $(RNG_SOURCE)
-	cargo build --release --manifest-path $(RNG_DIR)/Cargo.toml
+	cd $(RNG_DIR) && cargo build --release
 
 obj/%.o: %.cpp $(HFILE) $(RNG_HEADERS)
 	$(CXX) $(CXXFLAG) -c $< -o $@ -Isrc -I$(RNG_DIR)/include -I$(HTSLIB_INC) -I$(BOOST_INC)

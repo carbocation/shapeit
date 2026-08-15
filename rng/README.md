@@ -16,6 +16,21 @@ index bounds, and integer arithmetic before writing caller-owned output. On
 x86-64 both operations perform runtime BMI2 detection and use tiled `PEXT`
 kernels; other targets use portable byte-exact implementations.
 
+## Common HMM window
+
+`shapeit_hmm_run_segment_double_v1` owns one complete double-precision
+common-phasing HMM window: forward and backward recurrences, transition
+contraction, and missing-genotype probabilities. The ABI accepts the genotype
+graph, an already subset-transposed conditioning panel, model parameters, and
+window coordinates. Rust validates the complete graph-derived layout before
+writing any output, while all variable-size workspace remains caller-owned.
+
+The portable implementation is used on non-x86 targets. SHAPEIT's existing
+x86-64 build contract requires AVX2 and FMA; the Rust build uses the same
+features and explicitly vectorizes the dominant homozygous and ambiguous
+recurrences. The C++ adapter makes one Rust call per double-precision recovery
+window rather than crossing the ABI within a locus loop.
+
 ## Random-number generation
 
 ABI version 1 uses Philox4x32-10. A random block is a pure function of:

@@ -59,9 +59,10 @@ void phaser::phaseWindow(int id_worker, int id_job) {
 
 		if (G.vecG[id_job]->double_precision) {
 			//Run using double precision as underflow happened previously
-			haplotype_segment_double HS(G.vecG[id_job], H.H_opt_hap, threadData[id_worker].Kstates[w], threadData[id_worker].Windows.W[w], M);
-			HS.forward();
-			outcome = HS.backward(threadData[id_worker].T, threadData[id_worker].M);
+			outcome = run_haplotype_segment_double_rust(
+				G.vecG[id_job], H.H_opt_hap, threadData[id_worker].Kstates[w],
+				threadData[id_worker].Windows.W[w], M,
+				threadData[id_worker].T, threadData[id_worker].M);
 		} else {
 			//Try single precision as this is faster
 			haplotype_segment_single HS(G.vecG[id_job], H.H_opt_hap, threadData[id_worker].Kstates[w], threadData[id_worker].Windows.W[w], M);
@@ -70,9 +71,10 @@ void phaser::phaseWindow(int id_worker, int id_job) {
 
 			//Underflow happening with single precision, rerun using double precision
 			if (outcome != 0) {
-				haplotype_segment_double HS(G.vecG[id_job], H.H_opt_hap, threadData[id_worker].Kstates[w], threadData[id_worker].Windows.W[w], M);
-				HS.forward();
-				outcome = HS.backward(threadData[id_worker].T, threadData[id_worker].M);
+				outcome = run_haplotype_segment_double_rust(
+					G.vecG[id_job], H.H_opt_hap, threadData[id_worker].Kstates[w],
+					threadData[id_worker].Windows.W[w], M,
+					threadData[id_worker].T, threadData[id_worker].M);
 				G.vecG[id_job]->double_precision = true;
 				underflow_recovered_precision++;
 			}
