@@ -62,6 +62,11 @@ applies stored missing-genotype consensus probabilities. The C++ adapter keeps
 the serialized compressed transition mask and passes only its ordered active
 indexes, avoiding any persistent memory expansion.
 
+The whole target-haplotype refresh is likewise a single checked Rust call. It
+decodes every sample's packed genotype variants directly into the haplotype-
+major bitmatrix while preserving fixed homozygous and scaffolded loci between
+iterations; C++ supplies only a borrowed array of packed-variant views.
+
 `shapeit_genotype_windows_v1` maps an entire graph into HMM windows and owns the
 recursive randomized splitter. It reconstructs the fresh logical Philox stream
 and preserves depth-first draw order, overlapping split boundaries, and all

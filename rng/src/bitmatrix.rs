@@ -337,6 +337,39 @@ fn full_transpose(source: &[u8], target: &mut [u8], layout: FullTransposeLayout)
     full_transpose_portable(source, target, layout);
 }
 
+fn refresh_sample_haplotypes(
+    variants: &[u8],
+    variant_count: usize,
+    first_time: bool,
+    haplotype0: &mut [u8],
+    haplotype1: &mut [u8],
+) {
+    for byte in 0..variant_count.div_ceil(8) {
+        let mut update_mask = 0u8;
+        let mut allele0 = 0u8;
+        let mut allele1 = 0u8;
+        let locus_start = byte * 8;
+        let locus_stop = core::cmp::min(locus_start + 8, variant_count);
+        for locus in locus_start..locus_stop {
+            let packed = variants[locus >> 1];
+            let code = (packed >> ((locus & 1) * 4)) & 15;
+            let genotype = code & 3;
+            let bit = 0x80 >> (locus - locus_start);
+            if first_time || genotype == 1 || genotype == 2 {
+                update_mask |= bit;
+            }
+            if code & 4 != 0 {
+                allele0 |= bit;
+            }
+            if code & 8 != 0 {
+                allele1 |= bit;
+            }
+        }
+        haplotype0[byte] = (haplotype0[byte] & !update_mask) | (allele0 & update_mask);
+        haplotype1[byte] = (haplotype1[byte] & !update_mask) | (allele1 & update_mask);
+    }
+}
+
 #[inline]
 fn overlap_from_counts(intersection: u32, union: u32) -> f32 {
     if union == 0 {
@@ -523,6 +556,88 @@ pub unsafe extern "C" fn shapeit_bitmatrix_transpose_v1(
 }
 
 #[no_mangle]
+/// Refresh every target haplotype row from packed common-phasing genotypes.
+///
+/// On the first refresh every real locus is written. Later refreshes update
+/// only heterozygous and missing loci, preserving fixed homozygous and
+/// scaffolded alleles exactly as the established common phaser does.
+///
+/// # Safety
+///
+/// `variants` must point to `individual_count` readable pointers, each valid
+/// for `variants_length` bytes. `haplotypes` must be writable for
+/// `haplotypes_length` bytes, and the input buffers must not overlap it.
+/// Invalid dimensions are reported before writing.
+pub unsafe extern "C" fn shapeit_bitmatrix_refresh_haplotypes_v1(
+    variants: *const *const u8,
+    individual_count: usize,
+    variants_length: usize,
+    variant_count: usize,
+    first_time: u8,
+    haplotypes: *mut u8,
+    haplotypes_length: usize,
+    haplotype_rows: usize,
+    haplotype_stride: usize,
+) -> u32 {
+    if variants.is_null() || haplotypes.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    if individual_count == 0
+        || variant_count == 0
+        || first_time > 1
+        || haplotype_rows == 0
+        || haplotype_rows & 7 != 0
+        || haplotype_stride == 0
+    {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    let required_variants = match variant_count.checked_add(1) {
+        Some(value) => value >> 1,
+        None => return STATUS_INTEGER_OVERFLOW,
+    };
+    let required_haplotype_bytes = match variant_count.checked_add(7) {
+        Some(value) => value >> 3,
+        None => return STATUS_INTEGER_OVERFLOW,
+    };
+    let target_rows = match individual_count.checked_mul(2) {
+        Some(value) => value,
+        None => return STATUS_INTEGER_OVERFLOW,
+    };
+    let required_length = match haplotype_rows.checked_mul(haplotype_stride) {
+        Some(value) => value,
+        None => return STATUS_INTEGER_OVERFLOW,
+    };
+    if required_variants > variants_length
+        || required_haplotype_bytes > haplotype_stride
+        || target_rows > haplotype_rows
+        || required_length > haplotypes_length
+    {
+        return STATUS_OUT_OF_BOUNDS;
+    }
+    let variant_views = slice::from_raw_parts(variants, individual_count);
+    if variant_views.iter().any(|pointer| pointer.is_null()) {
+        return STATUS_NULL_POINTER;
+    }
+
+    let haplotypes = slice::from_raw_parts_mut(haplotypes, haplotypes_length);
+    for (individual, &variant_view) in variant_views.iter().enumerate() {
+        let packed_variants = slice::from_raw_parts(variant_view, variants_length);
+        let row0_start = individual * 2 * haplotype_stride;
+        let (_, rows) = haplotypes.split_at_mut(row0_start);
+        let (haplotype0, rows) = rows.split_at_mut(haplotype_stride);
+        let (haplotype1, _) = rows.split_at_mut(haplotype_stride);
+        refresh_sample_haplotypes(
+            packed_variants,
+            variant_count,
+            first_time != 0,
+            haplotype0,
+            haplotype1,
+        );
+    }
+    STATUS_OK
+}
+
+#[no_mangle]
 /// Calculate the matching-heterozygote proportion for two diploid individuals.
 ///
 /// The inclusive locus interval is deliberately rounded out to complete bytes,
@@ -631,6 +746,103 @@ mod tests {
             union += (het0 | het1).count_ones();
         }
         overlap_from_counts(intersection, union)
+    }
+
+    fn pack_variant_codes(codes: &[u8]) -> Vec<u8> {
+        let mut packed = vec![0u8; codes.len().div_ceil(2)];
+        for (locus, &code) in codes.iter().enumerate() {
+            packed[locus >> 1] |= code << ((locus & 1) * 4);
+        }
+        packed
+    }
+
+    fn haplotype_bit(haplotypes: &[u8], stride: usize, row: usize, locus: usize) -> u8 {
+        (haplotypes[row * stride + (locus >> 3)] >> (7 - (locus & 7))) & 1
+    }
+
+    #[test]
+    fn whole_haplotype_refresh_preserves_fixed_loci_after_initialization() {
+        const VARIANT_COUNT: usize = 9;
+        const HAPLOTYPE_ROWS: usize = 8;
+        const HAPLOTYPE_STRIDE: usize = 2;
+        let initial_codes = [
+            [0u8, 12, 6, 10, 1, 5, 9, 13, 3],
+            [12u8, 0, 10, 6, 13, 9, 5, 1, 15],
+        ];
+        let initial: Vec<Vec<u8>> = initial_codes
+            .iter()
+            .map(|codes| pack_variant_codes(codes))
+            .collect();
+        let initial_views: Vec<*const u8> = initial.iter().map(|packed| packed.as_ptr()).collect();
+        let mut haplotypes = vec![0xa5u8; HAPLOTYPE_ROWS * HAPLOTYPE_STRIDE];
+        let status = unsafe {
+            shapeit_bitmatrix_refresh_haplotypes_v1(
+                initial_views.as_ptr(),
+                initial_views.len(),
+                initial[0].len(),
+                VARIANT_COUNT,
+                1,
+                haplotypes.as_mut_ptr(),
+                haplotypes.len(),
+                HAPLOTYPE_ROWS,
+                HAPLOTYPE_STRIDE,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        for (individual, codes) in initial_codes.iter().enumerate() {
+            for (locus, &code) in codes.iter().enumerate() {
+                assert_eq!(
+                    haplotype_bit(&haplotypes, HAPLOTYPE_STRIDE, individual * 2, locus),
+                    (code >> 2) & 1
+                );
+                assert_eq!(
+                    haplotype_bit(&haplotypes, HAPLOTYPE_STRIDE, individual * 2 + 1, locus),
+                    (code >> 3) & 1
+                );
+            }
+        }
+
+        let changed_codes = [
+            [12u8, 0, 10, 6, 13, 1, 5, 9, 15],
+            [0u8, 12, 6, 10, 1, 5, 9, 13, 3],
+        ];
+        let changed: Vec<Vec<u8>> = changed_codes
+            .iter()
+            .map(|codes| pack_variant_codes(codes))
+            .collect();
+        let changed_views: Vec<*const u8> = changed.iter().map(|packed| packed.as_ptr()).collect();
+        let status = unsafe {
+            shapeit_bitmatrix_refresh_haplotypes_v1(
+                changed_views.as_ptr(),
+                changed_views.len(),
+                changed[0].len(),
+                VARIANT_COUNT,
+                0,
+                haplotypes.as_mut_ptr(),
+                haplotypes.len(),
+                HAPLOTYPE_ROWS,
+                HAPLOTYPE_STRIDE,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        for individual in 0..initial_codes.len() {
+            for locus in 0..VARIANT_COUNT {
+                let changed = changed_codes[individual][locus];
+                let code = if matches!(changed & 3, 1 | 2) {
+                    changed
+                } else {
+                    initial_codes[individual][locus]
+                };
+                assert_eq!(
+                    haplotype_bit(&haplotypes, HAPLOTYPE_STRIDE, individual * 2, locus),
+                    (code >> 2) & 1
+                );
+                assert_eq!(
+                    haplotype_bit(&haplotypes, HAPLOTYPE_STRIDE, individual * 2 + 1, locus),
+                    (code >> 3) & 1
+                );
+            }
+        }
     }
 
     #[test]

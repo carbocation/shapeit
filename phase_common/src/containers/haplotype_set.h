@@ -40,6 +40,7 @@ public:
 	unsigned long n_site;		// #variants
 	unsigned long n_hap;		// #haplotypes
 	unsigned long n_ind;		// #individuals
+	std::vector < const uint8_t * > VariantViews;
 
 	//CONSTRUCTOR/DESTRUCTOR/INITIALIZATION
 	haplotype_set();

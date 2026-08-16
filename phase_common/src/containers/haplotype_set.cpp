@@ -21,6 +21,10 @@
  ******************************************************************************/
 
 #include <containers/haplotype_set.h>
+#include <shapeit_bitmatrix.h>
+
+#include <cstdint>
+#include <stdexcept>
 
 using namespace std;
 
@@ -36,6 +40,7 @@ void haplotype_set::clear() {
 	n_site = 0;
 	n_hap = 0;
 	n_ind = 0;
+	VariantViews.clear();
 }
 
 void haplotype_set::allocate(unsigned long n_main_samples, unsigned long n_ref_samples, unsigned long n_variants) {
@@ -48,15 +53,22 @@ void haplotype_set::allocate(unsigned long n_main_samples, unsigned long n_ref_s
 
 void haplotype_set::updateHaplotypes(genotype_set & G, bool first_time) {
 	tac.clock();
+	static_assert(sizeof(unsigned char) == sizeof(uint8_t));
+	const size_t variants_length = (n_site + 1) >> 1;
+	VariantViews.resize(G.n_ind);
 	for (unsigned int i = 0 ; i < G.n_ind ; i ++) {
-		for (unsigned int v = 0 ; v < n_site ; v ++) {
-			if (first_time || (VAR_GET_HET(MOD2(v), G.vecG[i]->Variants[DIV2(v)])) || (VAR_GET_MIS(MOD2(v), G.vecG[i]->Variants[DIV2(v)]))) {
-				bool a0 = VAR_GET_HAP0(MOD2(v), G.vecG[i]->Variants[DIV2(v)]);
-				bool a1 = VAR_GET_HAP1(MOD2(v), G.vecG[i]->Variants[DIV2(v)]);
-				H_opt_hap.set(2*i+0, v, a0);
-				H_opt_hap.set(2*i+1, v, a1);
-			}
+		if (G.vecG[i]->Variants.size() < variants_length) {
+			throw runtime_error("Packed genotype variants are shorter than the haplotype matrix");
 		}
+		VariantViews[i] = G.vecG[i]->Variants.data();
+	}
+	const uint32_t status = shapeit_bitmatrix_refresh_haplotypes_v1(
+		VariantViews.data(), VariantViews.size(), variants_length, n_site,
+		first_time ? 1 : 0, H_opt_hap.bytes, H_opt_hap.n_bytes,
+		H_opt_hap.n_rows, H_opt_hap.n_cols >> 3);
+	if (status != SHAPEIT_BITMATRIX_STATUS_OK) {
+		throw runtime_error("Rust haplotype refresh rejected the matrix layout (status " +
+			to_string(status) + ")");
 	}
 	vrb.bullet("HAP update (" + stb.str(tac.rel_time()*1.0/1000, 2) + "s)");
 }

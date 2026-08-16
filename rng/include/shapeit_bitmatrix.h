@@ -41,6 +41,17 @@ uint32_t shapeit_bitmatrix_transpose_v1(
     size_t target_length,
     size_t target_stride);
 
+uint32_t shapeit_bitmatrix_refresh_haplotypes_v1(
+    const uint8_t * const * variants,
+    size_t individual_count,
+    size_t variants_length,
+    size_t variant_count,
+    uint8_t first_time,
+    uint8_t * haplotypes,
+    size_t haplotypes_length,
+    size_t haplotype_rows,
+    size_t haplotype_stride);
+
 uint32_t shapeit_bitmatrix_het_overlap_v1(
     const uint8_t * source,
     size_t source_length,
