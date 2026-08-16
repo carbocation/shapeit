@@ -50,8 +50,6 @@ public:
 	std::string name;
 	unsigned int index;						// Index in containers
 	unsigned int n_variants;				// Number of variants	(to iterate over Variants)
-	bool double_precision;					//If I get underflows using float, move to double
-	bool haploid;							//Is this sample haploid?
 
 	// Stable borrowed span into the Rust-owned packed variant allocation.
 	std::span < unsigned char > Variants;
@@ -73,6 +71,10 @@ public:
 	uint32_t setHetsAsMissing();
 	shapeit_genotype_graph_view_v1 graphView() const;
 	std::span < const unsigned char > packedVariants() const;
+	bool isHaploid() const;
+	void setHaploid();
+	bool requiresDoublePrecision() const;
+	void requireDoublePrecision();
 };
 
 #endif

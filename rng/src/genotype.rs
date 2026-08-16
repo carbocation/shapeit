@@ -155,6 +155,8 @@ pub struct GenotypeGraphV1 {
     transition_count: u32,
     storage: Option<GenotypeStorageV1>,
     built: bool,
+    haploid: bool,
+    double_precision: bool,
 }
 
 impl GenotypeGraphV1 {
@@ -875,6 +877,8 @@ impl GenotypeGraphV1 {
             transition_count,
             storage: None,
             built: true,
+            haploid: false,
+            double_precision: false,
         }
     }
 
@@ -889,6 +893,8 @@ impl GenotypeGraphV1 {
             transition_count: 0,
             storage: None,
             built: false,
+            haploid: false,
+            double_precision: false,
         }
     }
 
@@ -1683,6 +1689,61 @@ pub unsafe extern "C" fn shapeit_genotype_graph_variants_mut_v1(
 }
 
 #[no_mangle]
+/// Set whether this sample follows haploid sampling and solving rules.
+///
+/// # Safety
+///
+/// `graph` must be live and exclusively borrowed.
+pub unsafe extern "C" fn shapeit_genotype_graph_set_haploid_v1(
+    graph: *mut GenotypeGraphV1,
+    haploid: u8,
+) -> u32 {
+    if graph.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    if haploid > 1 {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    (*graph).haploid = haploid != 0;
+    STATUS_OK
+}
+
+#[no_mangle]
+/// Return persistent per-sample graph flags.
+///
+/// # Safety
+///
+/// `graph` must be live and both flag pointers writable.
+pub unsafe extern "C" fn shapeit_genotype_graph_flags_v1(
+    graph: *const GenotypeGraphV1,
+    haploid: *mut u8,
+    double_precision: *mut u8,
+) -> u32 {
+    if graph.is_null() || haploid.is_null() || double_precision.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    *haploid = u8::from((*graph).haploid);
+    *double_precision = u8::from((*graph).double_precision);
+    STATUS_OK
+}
+
+#[no_mangle]
+/// Persist single-precision underflow recovery for later HMM windows.
+///
+/// # Safety
+///
+/// `graph` must be live and exclusively borrowed.
+pub unsafe extern "C" fn shapeit_genotype_graph_require_double_v1(
+    graph: *mut GenotypeGraphV1,
+) -> u32 {
+    if graph.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    (*graph).double_precision = true;
+    STATUS_OK
+}
+
+#[no_mangle]
 /// Finalize all derived graph arrays from previously populated packed variants.
 ///
 /// # Safety
@@ -2272,6 +2333,42 @@ pub unsafe extern "C" fn shapeit_genotype_graph_sample_v1(
 }
 
 #[no_mangle]
+/// Sample using the haploid state retained by a Rust-owned graph.
+///
+/// # Safety
+///
+/// `graph` must be live and exclusively borrowed. Probability buffers must be
+/// readable for their stated lengths.
+pub unsafe extern "C" fn shapeit_genotype_graph_sample_current_v1(
+    graph: *mut GenotypeGraphV1,
+    transition_probabilities: *const f64,
+    transition_probabilities_length: usize,
+    missing_probabilities: *const f32,
+    missing_probabilities_length: usize,
+    seed: u64,
+    domain: u32,
+    iteration: u32,
+    item: u64,
+) -> u32 {
+    if graph.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let haploid = u8::from((*graph).haploid);
+    shapeit_genotype_graph_sample_v1(
+        graph,
+        transition_probabilities,
+        transition_probabilities_length,
+        missing_probabilities,
+        missing_probabilities_length,
+        haploid,
+        seed,
+        domain,
+        iteration,
+        item,
+    )
+}
+
+#[no_mangle]
 /// Select the maximum-probability stored path and apply it to packed alleles.
 ///
 /// Stored transition indexes must be strictly increasing and correspond
@@ -2676,6 +2773,22 @@ pub unsafe extern "C" fn shapeit_genotype_graph_solve_v1(
         haploid,
         storage.storage_events,
     )
+}
+
+#[no_mangle]
+/// Solve using the haploid state retained by a Rust-owned graph.
+///
+/// # Safety
+///
+/// `graph` must be live and exclusively borrowed.
+pub unsafe extern "C" fn shapeit_genotype_graph_solve_current_v1(
+    graph: *mut GenotypeGraphV1,
+) -> u32 {
+    if graph.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let haploid = u8::from((*graph).haploid);
+    shapeit_genotype_graph_solve_v1(graph, haploid)
 }
 
 #[no_mangle]
@@ -3137,6 +3250,32 @@ mod tests {
         let mut graph = core::ptr::null_mut();
         let allocate_status = unsafe { shapeit_genotype_graph_allocate_v1(6, &mut graph) };
         assert_eq!(allocate_status, STATUS_OK);
+
+        let mut haploid = 0xa5;
+        let mut double_precision = 0xa5;
+        assert_eq!(
+            unsafe { shapeit_genotype_graph_flags_v1(graph, &mut haploid, &mut double_precision,) },
+            STATUS_OK
+        );
+        assert_eq!((haploid, double_precision), (0, 0));
+        assert_eq!(
+            unsafe { shapeit_genotype_graph_set_haploid_v1(graph, 2) },
+            STATUS_INVALID_DIMENSIONS
+        );
+        assert_eq!(
+            unsafe { shapeit_genotype_graph_set_haploid_v1(graph, 1) },
+            STATUS_OK
+        );
+        assert_eq!(
+            unsafe { shapeit_genotype_graph_require_double_v1(graph) },
+            STATUS_OK
+        );
+        assert_eq!(
+            unsafe { shapeit_genotype_graph_flags_v1(graph, &mut haploid, &mut double_precision,) },
+            STATUS_OK
+        );
+        assert_eq!((haploid, double_precision), (1, 1));
+
         let mut variants = core::ptr::null_mut();
         let mut variants_length = 0usize;
         let variants_status = unsafe {

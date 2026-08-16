@@ -32,8 +32,6 @@ genotype::genotype(unsigned int _index) {
 	Variants = {};
 	Graph = nullptr;
 	this->name = "";
-	double_precision = false;
-	haploid = false;
 }
 
 genotype::~genotype() {
@@ -82,4 +80,40 @@ shapeit_genotype_graph_view_v1 genotype::graphView() const {
 
 span < const unsigned char > genotype::packedVariants() const {
 	return span < const unsigned char > (Variants.data(), Variants.size());
+}
+
+bool genotype::isHaploid() const {
+	uint8_t haploid = 0, double_precision = 0;
+	const uint32_t status = shapeit_genotype_graph_flags_v1(Graph, &haploid, &double_precision);
+	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
+		throw runtime_error("Rust genotype graph flags are unavailable (status " +
+			to_string(status) + ")");
+	}
+	return haploid != 0;
+}
+
+void genotype::setHaploid() {
+	const uint32_t status = shapeit_genotype_graph_set_haploid_v1(Graph, 1);
+	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
+		throw runtime_error("Rust genotype haploid flag update failed (status " +
+			to_string(status) + ")");
+	}
+}
+
+bool genotype::requiresDoublePrecision() const {
+	uint8_t haploid = 0, double_precision = 0;
+	const uint32_t status = shapeit_genotype_graph_flags_v1(Graph, &haploid, &double_precision);
+	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
+		throw runtime_error("Rust genotype graph flags are unavailable (status " +
+			to_string(status) + ")");
+	}
+	return double_precision != 0;
+}
+
+void genotype::requireDoublePrecision() {
+	const uint32_t status = shapeit_genotype_graph_require_double_v1(Graph);
+	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
+		throw runtime_error("Rust genotype precision flag update failed (status " +
+			to_string(status) + ")");
+	}
 }

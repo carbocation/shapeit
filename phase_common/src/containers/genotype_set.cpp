@@ -119,8 +119,8 @@ void genotype_set::scaffoldUsingPedigrees(pedigree_reader & pr) {
 		genotype * gkid = (itK != mapG.end())?itK->second : NULL;
 		genotype * gfather = (itF != mapG.end())?itF->second : NULL;
 		genotype * gmother = (itM != mapG.end())?itM->second : NULL;
-		if (gkid && gkid->haploid && (gfather || gmother)) nunscaffoldedhaploids++;
-		if (gkid && !gkid->haploid) {
+		if (gkid && gkid->isHaploid() && (gfather || gmother)) nunscaffoldedhaploids++;
+		if (gkid && !gkid->isHaploid()) {
 			if (gfather && gmother) {
 				gkid->scaffoldTrio(gfather, gmother, counts);
 				ntrios++;
@@ -158,7 +158,7 @@ void genotype_set::resetHaploidHeterozgotes(vector < string > & haploids) {
 		itS = mapG.find(haploids[i]);
 		genotype * g = (itS != mapG.end())?itS->second : NULL;
 		if (g) {
-			g->haploid = true;
+			g->setHaploid();
 			nreset += g->setHetsAsMissing();
 			ntotal += g->n_variants;
 			nhaploids ++;

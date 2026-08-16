@@ -34,7 +34,7 @@ compute_job::compute_job(variant_map & _V, genotype_set & _G, conditioning_set &
 	M = vector < float > (n_max_missing , 0.0);
 	Conditioning = nullptr;
 	Haploid = vector < uint8_t > (G.n_ind, 0);
-	for (int ind = 0 ; ind < G.n_ind ; ind ++) Haploid[ind] = G.vecG[ind]->haploid;
+	for (int ind = 0 ; ind < G.n_ind ; ind ++) Haploid[ind] = G.vecG[ind]->isHaploid();
 }
 
 compute_job::compute_job(const compute_job & other) : V(other.V), G(other.G), H(other.H) {

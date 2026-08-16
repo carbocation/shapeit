@@ -98,6 +98,18 @@ uint32_t shapeit_genotype_graph_variants_mut_v1(
     uint8_t ** variants,
     size_t * variants_length);
 
+uint32_t shapeit_genotype_graph_set_haploid_v1(
+    shapeit_genotype_graph_v1 * graph,
+    uint8_t haploid);
+
+uint32_t shapeit_genotype_graph_flags_v1(
+    const shapeit_genotype_graph_v1 * graph,
+    uint8_t * haploid,
+    uint8_t * double_precision);
+
+uint32_t shapeit_genotype_graph_require_double_v1(
+    shapeit_genotype_graph_v1 * graph);
+
 uint32_t shapeit_genotype_graph_build_in_place_v1(
     shapeit_genotype_graph_v1 * graph);
 
@@ -185,6 +197,17 @@ uint32_t shapeit_genotype_graph_sample_v1(
     uint32_t iteration,
     uint64_t item);
 
+uint32_t shapeit_genotype_graph_sample_current_v1(
+    shapeit_genotype_graph_v1 * graph,
+    const double * transition_probabilities,
+    size_t transition_probabilities_length,
+    const float * missing_probabilities,
+    size_t missing_probabilities_length,
+    uint64_t seed,
+    uint32_t domain,
+    uint32_t iteration,
+    uint64_t item);
+
 uint32_t shapeit_genotype_solve_v1(
     uint8_t * variants,
     size_t variants_length,
@@ -249,6 +272,9 @@ uint32_t shapeit_genotype_graph_solve_storage_v1(
 uint32_t shapeit_genotype_graph_solve_v1(
     shapeit_genotype_graph_v1 * graph,
     uint8_t haploid);
+
+uint32_t shapeit_genotype_graph_solve_current_v1(
+    shapeit_genotype_graph_v1 * graph);
 
 uint32_t shapeit_genotype_windows_v1(
     const uint8_t * variants,

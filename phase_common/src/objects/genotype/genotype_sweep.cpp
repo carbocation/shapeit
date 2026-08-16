@@ -31,10 +31,10 @@ using namespace std;
 
 void genotype::sample(vector < double > & CurrentTransProbabilities, vector < float > & CurrentMissingProbabilities, random_number_generator & job_rng) {
 	assert(job_rng.isFresh());
-	const uint32_t status = shapeit_genotype_graph_sample_v1(
+	const uint32_t status = shapeit_genotype_graph_sample_current_v1(
 		Graph, CurrentTransProbabilities.data(),
 		CurrentTransProbabilities.size(), CurrentMissingProbabilities.data(),
-		CurrentMissingProbabilities.size(), haploid, job_rng.getSeed(),
+		CurrentMissingProbabilities.size(), job_rng.getSeed(),
 		job_rng.getDomain(), job_rng.getIteration(), job_rng.getItem());
 	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
 		throw runtime_error("Rust genotype sampler rejected graph layout (status " +
@@ -43,7 +43,7 @@ void genotype::sample(vector < double > & CurrentTransProbabilities, vector < fl
 }
 
 void genotype::solve() {
-	const uint32_t status = shapeit_genotype_graph_solve_v1(Graph, haploid);
+	const uint32_t status = shapeit_genotype_graph_solve_current_v1(Graph);
 	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
 		throw runtime_error("Rust genotype solver rejected stored graph state (status " +
 			to_string(status) + ")");
