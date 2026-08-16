@@ -62,6 +62,11 @@ applies stored missing-genotype consensus probabilities. The C++ adapter keeps
 the serialized compressed transition mask and passes only its ordered active
 indexes, avoiding any persistent memory expansion.
 
+`shapeit_genotype_windows_v1` maps an entire graph into HMM windows and owns the
+recursive randomized splitter. It reconstructs the fresh logical Philox stream
+and preserves depth-first draw order, overlapping split boundaries, and all
+graph-coordinate conventions in one checked call.
+
 ## PBWT initialization sweep
 
 `shapeit_pbwt_solve_chunk_v1` owns one complete PBWT initialization chunk,

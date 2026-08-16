@@ -12,6 +12,19 @@
 #define SHAPEIT_GENOTYPE_STATUS_OUT_OF_BOUNDS 3U
 #define SHAPEIT_GENOTYPE_STATUS_INTEGER_OVERFLOW 4U
 
+typedef struct shapeit_genotype_window_v1 {
+    int32_t start_locus;
+    int32_t start_segment;
+    int32_t start_ambiguous;
+    int32_t start_missing;
+    int32_t start_transition;
+    int32_t stop_locus;
+    int32_t stop_segment;
+    int32_t stop_ambiguous;
+    int32_t stop_missing;
+    int32_t stop_transition;
+} shapeit_genotype_window_v1;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -76,6 +89,27 @@ uint32_t shapeit_genotype_solve_v1(
     size_t missing_probabilities_length,
     uint8_t haploid,
     uint32_t storage_events);
+
+uint32_t shapeit_genotype_windows_v1(
+    const uint8_t * variants,
+    size_t variants_length,
+    size_t variant_count,
+    const uint64_t * diplotypes,
+    size_t diplotypes_length,
+    const uint16_t * segment_lengths,
+    size_t segment_lengths_length,
+    const double * segment_start_centimorgans,
+    size_t segment_start_centimorgans_length,
+    const double * segment_stop_centimorgans,
+    size_t segment_stop_centimorgans_length,
+    float minimum_window_centimorgans,
+    uint64_t seed,
+    uint32_t domain,
+    uint32_t iteration,
+    uint64_t item,
+    shapeit_genotype_window_v1 * windows,
+    size_t windows_capacity,
+    size_t * windows_length);
 
 #ifdef __cplusplus
 }

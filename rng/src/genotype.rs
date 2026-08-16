@@ -67,12 +67,44 @@ impl LogicalRng {
         let bits = (u64::from(self.next_u32()) << 32) | u64::from(self.next_u32());
         ((bits >> 11) as f64) * (1.0 / 9_007_199_254_740_992.0)
     }
+
+    #[inline]
+    fn next_bounded(&mut self, range: u32) -> u32 {
+        debug_assert!(range != 0);
+        let mut value = self.next_u32();
+        let mut product = u64::from(value) * u64::from(range);
+        let mut low = product as u32;
+        if low < range {
+            let threshold = range.wrapping_neg() % range;
+            while low < threshold {
+                value = self.next_u32();
+                product = u64::from(value) * u64::from(range);
+                low = product as u32;
+            }
+        }
+        (product >> 32) as u32
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SampleLayout {
     transitions: usize,
     missing: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GenotypeWindowV1 {
+    start_locus: i32,
+    start_segment: i32,
+    start_ambiguous: i32,
+    start_missing: i32,
+    start_transition: i32,
+    stop_locus: i32,
+    stop_segment: i32,
+    stop_ambiguous: i32,
+    stop_missing: i32,
+    stop_transition: i32,
 }
 
 #[inline]
@@ -605,6 +637,165 @@ fn apply_solution(parameters: ApplySolution<'_>) {
     }
 }
 
+#[derive(Clone, Copy)]
+struct SegmentCoordinates {
+    locus_start: usize,
+    locus_count: usize,
+    ambiguous_start: usize,
+    ambiguous_count: usize,
+    missing_start: usize,
+    missing_count: usize,
+    transition_start: usize,
+    transition_count: usize,
+    start_centimorgans: f64,
+    stop_centimorgans: f64,
+}
+
+fn segment_coordinates(
+    variants: &[u8],
+    variant_count: usize,
+    diplotypes: &[u64],
+    segment_lengths: &[u16],
+    segment_start_centimorgans: &[f64],
+    segment_stop_centimorgans: &[f64],
+) -> Result<Vec<SegmentCoordinates>, u32> {
+    if diplotypes.is_empty()
+        || diplotypes.len() != segment_lengths.len()
+        || diplotypes.len() != segment_start_centimorgans.len()
+        || diplotypes.len() != segment_stop_centimorgans.len()
+    {
+        return Err(STATUS_INVALID_DIMENSIONS);
+    }
+    let mut coordinates = Vec::with_capacity(diplotypes.len());
+    let mut locus = 0usize;
+    let mut ambiguous = 0usize;
+    let mut missing = 0usize;
+    let mut transition = 0usize;
+    let mut previous_diplotypes = 1usize;
+    for segment in 0..diplotypes.len() {
+        let locus_count = usize::from(segment_lengths[segment]);
+        if locus_count == 0 {
+            return Err(STATUS_INVALID_DIMENSIONS);
+        }
+        let stop = locus
+            .checked_add(locus_count)
+            .ok_or(STATUS_INTEGER_OVERFLOW)?;
+        if stop > variant_count {
+            return Err(STATUS_OUT_OF_BOUNDS);
+        }
+        let mut ambiguous_count = 0usize;
+        let mut missing_count = 0usize;
+        for absolute_locus in locus..stop {
+            match graph_code(variant_nibble(variants, absolute_locus)) {
+                1 => missing_count += 1,
+                2 | 3 => ambiguous_count += 1,
+                _ => {}
+            }
+        }
+        let current_diplotypes = diplotypes[segment].count_ones() as usize;
+        if current_diplotypes == 0 {
+            return Err(STATUS_INVALID_DIMENSIONS);
+        }
+        let transition_count = previous_diplotypes
+            .checked_mul(current_diplotypes)
+            .ok_or(STATUS_INTEGER_OVERFLOW)?;
+        coordinates.push(SegmentCoordinates {
+            locus_start: locus,
+            locus_count,
+            ambiguous_start: ambiguous,
+            ambiguous_count,
+            missing_start: missing,
+            missing_count,
+            transition_start: transition,
+            transition_count,
+            start_centimorgans: segment_start_centimorgans[segment],
+            stop_centimorgans: segment_stop_centimorgans[segment],
+        });
+        locus = stop;
+        ambiguous = ambiguous
+            .checked_add(ambiguous_count)
+            .ok_or(STATUS_INTEGER_OVERFLOW)?;
+        missing = missing
+            .checked_add(missing_count)
+            .ok_or(STATUS_INTEGER_OVERFLOW)?;
+        transition = transition
+            .checked_add(transition_count)
+            .ok_or(STATUS_INTEGER_OVERFLOW)?;
+        previous_diplotypes = current_diplotypes;
+    }
+    if locus != variant_count {
+        return Err(STATUS_INVALID_DIMENSIONS);
+    }
+    Ok(coordinates)
+}
+
+fn split_windows(
+    minimum_centimorgans: f64,
+    left: usize,
+    right: usize,
+    segments: &[SegmentCoordinates],
+    rng: &mut LogicalRng,
+) -> Option<Vec<(usize, usize)>> {
+    let number_of_segments = right - left + 1;
+    let number_of_variants =
+        segments[right].locus_start + segments[right].locus_count - segments[left].locus_start;
+    let length_centimorgans = segments[right].stop_centimorgans - segments[left].start_centimorgans;
+    if number_of_segments < 4
+        || number_of_variants < 100
+        || length_centimorgans < minimum_centimorgans
+    {
+        return None;
+    }
+
+    let random_span = (number_of_segments / 2) as u32;
+    let split = rng.next_bounded(random_span) as usize + number_of_segments / 4 + 1;
+    let left_windows = split_windows(minimum_centimorgans, left, left + split, segments, rng);
+    let right_windows = split_windows(minimum_centimorgans, left + split, right, segments, rng);
+    match (left_windows, right_windows) {
+        (Some(mut left_windows), Some(right_windows)) => {
+            left_windows.extend(right_windows);
+            Some(left_windows)
+        }
+        _ => Some(vec![(left, right)]),
+    }
+}
+
+fn signed_stop(start: usize, count: usize) -> Result<i32, u32> {
+    let stop = i64::try_from(start)
+        .map_err(|_| STATUS_INTEGER_OVERFLOW)?
+        .checked_add(i64::try_from(count).map_err(|_| STATUS_INTEGER_OVERFLOW)?)
+        .and_then(|value| value.checked_sub(1))
+        .ok_or(STATUS_INTEGER_OVERFLOW)?;
+    i32::try_from(stop).map_err(|_| STATUS_INTEGER_OVERFLOW)
+}
+
+fn output_window(
+    start: usize,
+    stop: usize,
+    segments: &[SegmentCoordinates],
+) -> Result<GenotypeWindowV1, u32> {
+    let start_segment = segments[start];
+    let stop_segment = segments[stop];
+    let as_i32 = |value: usize| i32::try_from(value).map_err(|_| STATUS_INTEGER_OVERFLOW);
+    Ok(GenotypeWindowV1 {
+        start_locus: as_i32(start_segment.locus_start)?,
+        start_segment: as_i32(start)?,
+        start_ambiguous: as_i32(start_segment.ambiguous_start)?,
+        start_missing: as_i32(start_segment.missing_start)?,
+        start_transition: as_i32(
+            start_segment
+                .transition_start
+                .checked_add(start_segment.transition_count)
+                .ok_or(STATUS_INTEGER_OVERFLOW)?,
+        )?,
+        stop_locus: signed_stop(stop_segment.locus_start, stop_segment.locus_count)?,
+        stop_segment: as_i32(stop)?,
+        stop_ambiguous: signed_stop(stop_segment.ambiguous_start, stop_segment.ambiguous_count)?,
+        stop_missing: signed_stop(stop_segment.missing_start, stop_segment.missing_count)?,
+        stop_transition: signed_stop(stop_segment.transition_start, stop_segment.transition_count)?,
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn shapeit_genotype_abi_version() -> u32 {
     ABI_VERSION
@@ -956,6 +1147,121 @@ pub unsafe extern "C" fn shapeit_genotype_solve_v1(
     STATUS_OK
 }
 
+#[no_mangle]
+/// Build all HMM windows for one common-phasing genotype graph.
+///
+/// RNG coordinates identify a fresh logical Philox stream. Recursive split
+/// decisions consume it in the established depth-first order.
+///
+/// # Safety
+///
+/// Every input buffer must be readable for its stated length. `windows` must be
+/// writable for `windows_capacity` records and `windows_length` must be
+/// writable. Invalid layouts are rejected before output is modified.
+pub unsafe extern "C" fn shapeit_genotype_windows_v1(
+    variants: *const u8,
+    variants_length: usize,
+    variant_count: usize,
+    diplotypes: *const u64,
+    diplotypes_length: usize,
+    segment_lengths: *const u16,
+    segment_lengths_length: usize,
+    segment_start_centimorgans: *const f64,
+    segment_start_centimorgans_length: usize,
+    segment_stop_centimorgans: *const f64,
+    segment_stop_centimorgans_length: usize,
+    minimum_window_centimorgans: f32,
+    seed: u64,
+    domain: u32,
+    iteration: u32,
+    item: u64,
+    windows: *mut GenotypeWindowV1,
+    windows_capacity: usize,
+    windows_length: *mut usize,
+) -> u32 {
+    if windows_length.is_null()
+        || (variants_length != 0 && variants.is_null())
+        || (diplotypes_length != 0 && diplotypes.is_null())
+        || (segment_lengths_length != 0 && segment_lengths.is_null())
+        || (segment_start_centimorgans_length != 0 && segment_start_centimorgans.is_null())
+        || (segment_stop_centimorgans_length != 0 && segment_stop_centimorgans.is_null())
+        || (windows_capacity != 0 && windows.is_null())
+    {
+        return STATUS_NULL_POINTER;
+    }
+    let required_variants = match required_variant_bytes(variant_count) {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
+    if required_variants > variants_length {
+        return STATUS_OUT_OF_BOUNDS;
+    }
+    let variants = if variants_length == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(variants, variants_length)
+    };
+    let diplotypes = if diplotypes_length == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(diplotypes, diplotypes_length)
+    };
+    let segment_lengths = if segment_lengths_length == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(segment_lengths, segment_lengths_length)
+    };
+    let segment_start_centimorgans = if segment_start_centimorgans_length == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(
+            segment_start_centimorgans,
+            segment_start_centimorgans_length,
+        )
+    };
+    let segment_stop_centimorgans = if segment_stop_centimorgans_length == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(segment_stop_centimorgans, segment_stop_centimorgans_length)
+    };
+    let segments = match segment_coordinates(
+        variants,
+        variant_count,
+        diplotypes,
+        segment_lengths,
+        segment_start_centimorgans,
+        segment_stop_centimorgans,
+    ) {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
+    let mut rng = LogicalRng::new(seed, domain, iteration, item);
+    let ranges = split_windows(
+        f64::from(minimum_window_centimorgans),
+        0,
+        segments.len() - 1,
+        &segments,
+        &mut rng,
+    )
+    .unwrap_or_else(|| vec![(0, segments.len() - 1)]);
+    if ranges.len() > windows_capacity {
+        return STATUS_OUT_OF_BOUNDS;
+    }
+    let mut output = Vec::with_capacity(ranges.len());
+    for (start, stop) in ranges {
+        output.push(match output_window(start, stop, &segments) {
+            Ok(value) => value,
+            Err(status) => return status,
+        });
+    }
+    if !output.is_empty() {
+        let windows = slice::from_raw_parts_mut(windows, windows_capacity);
+        windows[..output.len()].copy_from_slice(&output);
+    }
+    *windows_length = output.len();
+    STATUS_OK
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1158,5 +1464,56 @@ mod tests {
         };
         assert_eq!(status, STATUS_OK);
         assert_eq!(variants, [0x0d]);
+    }
+
+    #[test]
+    fn window_builder_preserves_graph_coordinate_conventions() {
+        let variants = [0u8; 50];
+        let diplotypes = [1u64; 4];
+        let lengths = [25u16; 4];
+        let start_centimorgans = [0.0f64, 1.0, 2.0, 3.0];
+        let stop_centimorgans = [0.9f64, 1.9, 2.9, 4.0];
+        let mut windows = [GenotypeWindowV1::default(); 4];
+        let mut window_count = 0usize;
+        let status = unsafe {
+            shapeit_genotype_windows_v1(
+                variants.as_ptr(),
+                variants.len(),
+                100,
+                diplotypes.as_ptr(),
+                diplotypes.len(),
+                lengths.as_ptr(),
+                lengths.len(),
+                start_centimorgans.as_ptr(),
+                start_centimorgans.len(),
+                stop_centimorgans.as_ptr(),
+                stop_centimorgans.len(),
+                1.0,
+                15_052_011,
+                2,
+                3,
+                7,
+                windows.as_mut_ptr(),
+                windows.len(),
+                &mut window_count,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(window_count, 1);
+        assert_eq!(
+            windows[0],
+            GenotypeWindowV1 {
+                start_locus: 0,
+                start_segment: 0,
+                start_ambiguous: 0,
+                start_missing: 0,
+                start_transition: 1,
+                stop_locus: 99,
+                stop_segment: 3,
+                stop_ambiguous: -1,
+                stop_missing: -1,
+                stop_transition: 3,
+            }
+        );
     }
 }
