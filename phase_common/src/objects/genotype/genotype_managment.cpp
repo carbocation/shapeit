@@ -21,6 +21,7 @@
  ******************************************************************************/
 
 #include <objects/genotype/genotype_header.h>
+#include <shapeit_genotype.h>
 
 using namespace std;
 
@@ -31,6 +32,7 @@ genotype::genotype(unsigned int _index) {
 	n_ambiguous = 0;
 	n_stored_transitionProbs = 0;
 	n_storage_events = 0;
+	Storage = nullptr;
 	std::fill(curr_dipcodes, curr_dipcodes + 64, 0);
 	this->name = "";
 	double_precision = false;
@@ -42,6 +44,10 @@ genotype::~genotype() {
 }
 
 void genotype::free() {
+	if (Storage != nullptr) {
+		shapeit_genotype_storage_free_v1(Storage);
+		Storage = nullptr;
+	}
 	std::fill(curr_dipcodes, curr_dipcodes + 64, 0);
 	name = "";
 	vector < unsigned char > ().swap(Variants);

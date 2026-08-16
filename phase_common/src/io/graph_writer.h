@@ -39,7 +39,6 @@ public:
 	~graph_writer();
 
 	//ROUTINES
-	void binary_write(output_file & fout, const std::vector<bool> & x);
 	void string_write(output_file & fout, std::string & x);
 
 	//IO

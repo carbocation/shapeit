@@ -21,6 +21,9 @@
  ******************************************************************************/
 
 #include <io/graph_writer.h>
+#include <shapeit_genotype.h>
+
+#include <stdexcept>
 
 using namespace std;
 
@@ -28,16 +31,6 @@ graph_writer::graph_writer(genotype_set & _G, variant_map & _V): G(_G), V(_V) {
 }
 
 graph_writer::~graph_writer() {
-}
-
-void graph_writer::binary_write(output_file & fout, const vector<bool> & x) {
-	vector<bool>::size_type n = x.size();
-	fout.write((const char*)&n, sizeof(std::vector<bool>::size_type));
-	for(std::vector<bool>::size_type i = 0; i < n;) {
-		unsigned char aggr = 0;
-		for(unsigned char mask = 1; mask > 0 && i < n; ++i, mask <<= 1) if(x.at(i)) aggr |= mask;
-		fout.write((const char*)&aggr, sizeof(unsigned char));
-    }
 }
 
 void graph_writer::string_write(output_file & fout, string & x) {
@@ -83,9 +76,24 @@ void graph_writer::writeGraphs(string fname) {
 		fd.write(reinterpret_cast<char*>(&G.vecG[g]->Ambiguous[0]), G.vecG[g]->Ambiguous.size());
 		fd.write(reinterpret_cast<char*>(&G.vecG[g]->Diplotypes[0]), G.vecG[g]->Diplotypes.size() * sizeof(unsigned long));
 		fd.write(reinterpret_cast<char*>(&G.vecG[g]->Lengths[0]), G.vecG[g]->Lengths.size() * sizeof(unsigned short));
-		binary_write(fd, G.vecG[g]->ProbMask);
-		fd.write(reinterpret_cast<char*>(&G.vecG[g]->ProbStored[0]), G.vecG[g]->ProbStored.size() * sizeof(float));
-		fd.write(reinterpret_cast<char*>(&G.vecG[g]->ProbMissing[0]), G.vecG[g]->ProbMissing.size() * sizeof(float));
+		shapeit_genotype_storage_view_v1 view = {};
+		const uint32_t status = shapeit_genotype_storage_borrow_v1(G.vecG[g]->Storage, &view);
+		if (status != SHAPEIT_GENOTYPE_STATUS_OK ||
+			view.transition_count != G.vecG[g]->n_transitions ||
+			view.transition_mask_length != (view.transition_count + 7) / 8 ||
+			view.transition_probabilities_length != G.vecG[g]->n_stored_transitionProbs ||
+			view.missing_probabilities_length != G.vecG[g]->n_missing * HAP_NUMBER ||
+			view.storage_events != G.vecG[g]->n_storage_events) {
+			throw runtime_error("Rust genotype storage returned an invalid graph-writer view");
+		}
+		const vector<bool>::size_type transition_count = view.transition_count;
+		fd.write(reinterpret_cast<const char *>(&transition_count), sizeof(transition_count));
+		if (view.transition_mask_length)
+			fd.write(reinterpret_cast<const char *>(view.transition_mask), view.transition_mask_length);
+		if (view.transition_probabilities_length)
+			fd.write(reinterpret_cast<const char *>(view.transition_probabilities), view.transition_probabilities_length * sizeof(float));
+		if (view.missing_probabilities_length)
+			fd.write(reinterpret_cast<const char *>(view.missing_probabilities), view.missing_probabilities_length * sizeof(float));
 	}
 	vrb.bullet("BIN writing [Compressed / N=" + stb.str(G.n_ind) + " / L=" + stb.str(V.size()) + "] (" + stb.str(tac.rel_time()*0.001, 2) + "s)");
 }

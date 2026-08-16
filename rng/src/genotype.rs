@@ -107,6 +107,99 @@ pub struct GenotypeWindowV1 {
     pub(crate) stop_transition: i32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GenotypeStorageViewV1 {
+    transition_count: usize,
+    transition_mask: *const u8,
+    transition_mask_length: usize,
+    transition_probabilities: *const f32,
+    transition_probabilities_length: usize,
+    missing_probabilities: *const f32,
+    missing_probabilities_length: usize,
+    storage_events: u32,
+}
+
+pub struct GenotypeStorageV1 {
+    transition_count: usize,
+    transition_mask: Vec<u8>,
+    transition_indexes: Vec<u32>,
+    transition_probabilities: Vec<f32>,
+    missing_probabilities: Vec<f32>,
+    storage_events: u32,
+}
+
+impl GenotypeStorageV1 {
+    fn new(transition_probabilities: &[f64], missing_probabilities: &[f32]) -> Result<Self, u32> {
+        if transition_probabilities.len() > u32::MAX as usize {
+            return Err(STATUS_INTEGER_OVERFLOW);
+        }
+        let mut transition_mask = vec![0u8; transition_probabilities.len().div_ceil(8)];
+        let mut transition_indexes = Vec::new();
+        let mut stored_probabilities = Vec::new();
+        for (index, &probability) in transition_probabilities.iter().enumerate() {
+            if probability >= 1e-6 {
+                transition_mask[index >> 3] |= 1 << (index & 7);
+                transition_indexes.push(index as u32);
+                stored_probabilities.push(probability as f32);
+            }
+        }
+        Ok(Self {
+            transition_count: transition_probabilities.len(),
+            transition_mask,
+            transition_indexes,
+            transition_probabilities: stored_probabilities,
+            missing_probabilities: missing_probabilities.to_vec(),
+            storage_events: 1,
+        })
+    }
+
+    fn update(
+        &mut self,
+        transition_probabilities: &[f64],
+        missing_probabilities: &[f32],
+    ) -> Result<(), u32> {
+        if transition_probabilities.len() != self.transition_count
+            || missing_probabilities.len() != self.missing_probabilities.len()
+        {
+            return Err(STATUS_INVALID_DIMENSIONS);
+        }
+        let storage_events = self
+            .storage_events
+            .checked_add(1)
+            .ok_or(STATUS_INTEGER_OVERFLOW)?;
+        for (&index, stored) in self
+            .transition_indexes
+            .iter()
+            .zip(self.transition_probabilities.iter_mut())
+        {
+            *stored = (f64::from(*stored) + transition_probabilities[index as usize]) as f32;
+        }
+        for (stored, &current) in self
+            .missing_probabilities
+            .iter_mut()
+            .zip(missing_probabilities)
+        {
+            *stored += current;
+        }
+        self.storage_events = storage_events;
+        Ok(())
+    }
+
+    fn view(&self) -> GenotypeStorageViewV1 {
+        GenotypeStorageViewV1 {
+            transition_count: self.transition_count,
+            transition_mask: self.transition_mask.as_ptr(),
+            transition_mask_length: self.transition_mask.len(),
+            transition_probabilities: self.transition_probabilities.as_ptr(),
+            transition_probabilities_length: self.transition_probabilities.len(),
+            missing_probabilities: self.missing_probabilities.as_ptr(),
+            missing_probabilities_length: self.missing_probabilities.len(),
+            storage_events: self.storage_events,
+        }
+    }
+}
+
 #[inline]
 fn variant_nibble(variants: &[u8], locus: usize) -> u8 {
     (variants[locus >> 1] >> ((locus & 1) << 2)) & 0x0f
@@ -1188,6 +1281,131 @@ pub unsafe extern "C" fn shapeit_genotype_solve_v1(
 }
 
 #[no_mangle]
+/// Accumulate one main-iteration probability set in Rust-owned storage.
+///
+/// A null storage pointer allocates the persistent mask from transition
+/// probabilities at or above `1e-6`. Later calls preserve that mask and apply
+/// the established float accumulation order.
+///
+/// # Safety
+///
+/// `storage` must be writable and contain null or a live storage object from
+/// this function. Non-empty probability buffers must be readable.
+pub unsafe extern "C" fn shapeit_genotype_storage_update_v1(
+    storage: *mut *mut GenotypeStorageV1,
+    transition_probabilities: *const f64,
+    transition_count: usize,
+    missing_probabilities: *const f32,
+    missing_probabilities_length: usize,
+) -> u32 {
+    if storage.is_null()
+        || (transition_count != 0 && transition_probabilities.is_null())
+        || (missing_probabilities_length != 0 && missing_probabilities.is_null())
+    {
+        return STATUS_NULL_POINTER;
+    }
+    let transition_probabilities = if transition_count == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(transition_probabilities, transition_count)
+    };
+    let missing_probabilities = if missing_probabilities_length == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(missing_probabilities, missing_probabilities_length)
+    };
+    if (*storage).is_null() {
+        let value = match GenotypeStorageV1::new(transition_probabilities, missing_probabilities) {
+            Ok(value) => value,
+            Err(status) => return status,
+        };
+        *storage = Box::into_raw(Box::new(value));
+        STATUS_OK
+    } else {
+        match (*(*storage)).update(transition_probabilities, missing_probabilities) {
+            Ok(()) => STATUS_OK,
+            Err(status) => status,
+        }
+    }
+}
+
+#[no_mangle]
+/// Free Rust-owned genotype probability storage. Null is accepted.
+///
+/// # Safety
+///
+/// `storage` must be null or a live pointer returned by the update function,
+/// and it must be freed at most once.
+pub unsafe extern "C" fn shapeit_genotype_storage_free_v1(storage: *mut GenotypeStorageV1) {
+    if !storage.is_null() {
+        drop(Box::from_raw(storage));
+    }
+}
+
+#[no_mangle]
+/// Borrow the serialized mask and accumulated probability arrays.
+///
+/// # Safety
+///
+/// `storage` must be live and `view` writable. Borrowed pointers remain valid
+/// only until the next storage update or free.
+pub unsafe extern "C" fn shapeit_genotype_storage_borrow_v1(
+    storage: *const GenotypeStorageV1,
+    view: *mut GenotypeStorageViewV1,
+) -> u32 {
+    if storage.is_null() || view.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    *view = (*storage).view();
+    STATUS_OK
+}
+
+#[no_mangle]
+/// Solve a genotype graph directly from Rust-owned accumulated storage.
+///
+/// # Safety
+///
+/// Graph buffers follow `shapeit_genotype_solve_v1`; `storage` must be live and
+/// must not overlap the graph buffers.
+pub unsafe extern "C" fn shapeit_genotype_solve_storage_v1(
+    variants: *mut u8,
+    variants_length: usize,
+    variant_count: usize,
+    ambiguous: *const u8,
+    ambiguous_length: usize,
+    diplotypes: *const u64,
+    diplotypes_length: usize,
+    segment_lengths: *const u16,
+    segment_lengths_length: usize,
+    storage: *const GenotypeStorageV1,
+    haploid: u8,
+) -> u32 {
+    if storage.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let storage = &*storage;
+    shapeit_genotype_solve_v1(
+        variants,
+        variants_length,
+        variant_count,
+        ambiguous,
+        ambiguous_length,
+        diplotypes,
+        diplotypes_length,
+        segment_lengths,
+        segment_lengths_length,
+        storage.transition_indexes.as_ptr(),
+        storage.transition_indexes.len(),
+        storage.transition_probabilities.as_ptr(),
+        storage.transition_probabilities.len(),
+        storage.missing_probabilities.as_ptr(),
+        storage.missing_probabilities.len(),
+        haploid,
+        storage.storage_events,
+    )
+}
+
+#[no_mangle]
 /// Build all HMM windows for one common-phasing genotype graph.
 ///
 /// RNG coordinates identify a fresh logical Philox stream. Recursive split
@@ -1317,6 +1535,36 @@ mod tests {
             &mut diplotypes,
         );
         (sizes, lengths, ambiguous, diplotypes, transitions)
+    }
+
+    #[test]
+    fn storage_preserves_mask_format_and_cpp_float_accumulation() {
+        let first_transitions = [0.0f64, 1e-6, 0.25, 9e-7, 1.0];
+        let first_missing = [0.125f32, 0.5];
+        let mut storage = GenotypeStorageV1::new(&first_transitions, &first_missing).unwrap();
+        assert_eq!(storage.transition_mask, [0b0001_0110]);
+        assert_eq!(storage.transition_indexes, [1, 2, 4]);
+        assert_eq!(storage.storage_events, 1);
+
+        let next_transitions = [0.75f64, 0.333_333_333_333, 0.125, 2.0, 1e-8];
+        let next_missing = [0.25f32, 0.125];
+        let expected_transitions: Vec<f32> = storage
+            .transition_indexes
+            .iter()
+            .zip(storage.transition_probabilities.iter())
+            .map(|(&index, &stored)| (f64::from(stored) + next_transitions[index as usize]) as f32)
+            .collect();
+        storage.update(&next_transitions, &next_missing).unwrap();
+        assert_eq!(storage.transition_probabilities, expected_transitions);
+        assert_eq!(storage.missing_probabilities, [0.375, 0.625]);
+        assert_eq!(storage.storage_events, 2);
+
+        let view = storage.view();
+        assert_eq!(view.transition_count, first_transitions.len());
+        assert_eq!(view.transition_mask_length, 1);
+        assert_eq!(view.transition_probabilities_length, 3);
+        assert_eq!(view.missing_probabilities_length, 2);
+        assert_eq!(view.storage_events, 2);
     }
 
     #[test]

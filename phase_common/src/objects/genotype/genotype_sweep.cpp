@@ -48,21 +48,11 @@ void genotype::sample(vector < double > & CurrentTransProbabilities, vector < fl
 
 void genotype::solve() {
 	static_assert(sizeof(unsigned long) == sizeof(uint64_t));
-	if (ProbMask.size() != n_transitions) {
-		throw runtime_error("Stored genotype transition mask has an invalid length");
-	}
-	vector < uint32_t > stored_indexes;
-	stored_indexes.reserve(n_stored_transitionProbs);
-	for (uint32_t transition = 0 ; transition < ProbMask.size() ; transition ++) {
-		if (ProbMask[transition]) stored_indexes.push_back(transition);
-	}
-	const uint32_t status = shapeit_genotype_solve_v1(
+	const uint32_t status = shapeit_genotype_solve_storage_v1(
 		Variants.data(), Variants.size(), n_variants,
 		Ambiguous.data(), Ambiguous.size(),
 		reinterpret_cast<const uint64_t *>(Diplotypes.data()), Diplotypes.size(),
-		Lengths.data(), Lengths.size(), stored_indexes.data(), stored_indexes.size(),
-		ProbStored.data(), ProbStored.size(), ProbMissing.data(), ProbMissing.size(),
-		haploid, n_storage_events);
+		Lengths.data(), Lengths.size(), Storage, haploid);
 	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
 		throw runtime_error("Rust genotype solver rejected stored graph state (status " +
 			to_string(status) + ")");
@@ -70,19 +60,23 @@ void genotype::solve() {
 }
 
 void genotype::store(vector < double > & CurrentTransProbabilities, vector < float > & CurrentMissingProbabilities) {
-	if (ProbMask.size() == 0) {
-		n_stored_transitionProbs = 0;
-		ProbMask = vector < bool > (n_transitions, false);
-		for (unsigned int t = 0 ; t < n_transitions ; t ++) if (CurrentTransProbabilities[t] >= 1e-6) {
-			n_stored_transitionProbs ++;
-			ProbMask[t] = true;
-		}
-		ProbStored = vector  < float > (n_stored_transitionProbs, 0.0);
-		ProbMissing = vector < float > (n_missing * HAP_NUMBER, 0.0);
+	const size_t missing_probabilities = n_missing * HAP_NUMBER;
+	if (CurrentTransProbabilities.size() < n_transitions ||
+		CurrentMissingProbabilities.size() < missing_probabilities) {
+		throw runtime_error("Current genotype probabilities are shorter than the graph layout");
 	}
-	for (unsigned int t = 0, trel = 0 ; t < n_transitions ; t ++) {
-		if (ProbMask[t]) ProbStored[trel++] += CurrentTransProbabilities[t];
+	uint32_t status = shapeit_genotype_storage_update_v1(
+		&Storage, CurrentTransProbabilities.data(), n_transitions,
+		CurrentMissingProbabilities.data(), missing_probabilities);
+	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
+		throw runtime_error("Rust genotype storage rejected current probabilities (status " +
+			to_string(status) + ")");
 	}
-	for (unsigned int m = 0 ; m < (n_missing * HAP_NUMBER) ; m ++) ProbMissing[m] += CurrentMissingProbabilities[m];
-	n_storage_events ++;
+	shapeit_genotype_storage_view_v1 view = {};
+	status = shapeit_genotype_storage_borrow_v1(Storage, &view);
+	if (status != SHAPEIT_GENOTYPE_STATUS_OK || view.transition_count != n_transitions) {
+		throw runtime_error("Rust genotype storage returned an invalid view");
+	}
+	n_stored_transitionProbs = view.transition_probabilities_length;
+	n_storage_events = view.storage_events;
 }

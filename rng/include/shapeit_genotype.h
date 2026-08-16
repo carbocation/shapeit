@@ -25,6 +25,19 @@ typedef struct shapeit_genotype_window_v1 {
     int32_t stop_transition;
 } shapeit_genotype_window_v1;
 
+typedef struct shapeit_genotype_storage_view_v1 {
+    size_t transition_count;
+    const uint8_t * transition_mask;
+    size_t transition_mask_length;
+    const float * transition_probabilities;
+    size_t transition_probabilities_length;
+    const float * missing_probabilities;
+    size_t missing_probabilities_length;
+    uint32_t storage_events;
+} shapeit_genotype_storage_view_v1;
+
+typedef struct shapeit_genotype_storage_v1 shapeit_genotype_storage_v1;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -89,6 +102,32 @@ uint32_t shapeit_genotype_solve_v1(
     size_t missing_probabilities_length,
     uint8_t haploid,
     uint32_t storage_events);
+
+uint32_t shapeit_genotype_storage_update_v1(
+    shapeit_genotype_storage_v1 ** storage,
+    const double * transition_probabilities,
+    size_t transition_count,
+    const float * missing_probabilities,
+    size_t missing_probabilities_length);
+
+void shapeit_genotype_storage_free_v1(shapeit_genotype_storage_v1 * storage);
+
+uint32_t shapeit_genotype_storage_borrow_v1(
+    const shapeit_genotype_storage_v1 * storage,
+    shapeit_genotype_storage_view_v1 * view);
+
+uint32_t shapeit_genotype_solve_storage_v1(
+    uint8_t * variants,
+    size_t variants_length,
+    size_t variant_count,
+    const uint8_t * ambiguous,
+    size_t ambiguous_length,
+    const uint64_t * diplotypes,
+    size_t diplotypes_length,
+    const uint16_t * segment_lengths,
+    size_t segment_lengths_length,
+    const shapeit_genotype_storage_v1 * storage,
+    uint8_t haploid);
 
 uint32_t shapeit_genotype_windows_v1(
     const uint8_t * variants,

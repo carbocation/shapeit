@@ -58,9 +58,13 @@ logical Philox stream from its stable coordinates and preserves the established
 draw sequence exactly; scheduling and thread identity never enter the ABI.
 
 `shapeit_genotype_solve_v1` performs final maximum-probability path decoding and
-applies stored missing-genotype consensus probabilities. The C++ adapter keeps
-the serialized compressed transition mask and passes only its ordered active
-indexes, avoiding any persistent memory expansion.
+applies stored missing-genotype consensus probabilities.
+
+The opaque `shapeit_genotype_storage_v1` now owns that persistent main-iteration
+state: the thresholded transition mask, ordered active indexes, accumulated
+transition and missing probabilities, and storage-event count. Final solving
+borrows it directly, while the graph writer receives a read-only view using the
+legacy LSB-first mask encoding.
 
 The whole target-haplotype refresh is likewise a single checked Rust call. It
 decodes every sample's packed genotype variants directly into the haplotype-

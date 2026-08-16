@@ -62,6 +62,7 @@
 #define MASK_UNF1	0x3333CCCC3333CCCCUL
 #define MASK_UNF2	0x0F0F0F0FF0F0F0F0UL
 
+struct shapeit_genotype_storage_v1;
 
 class genotype {
 public:
@@ -87,9 +88,7 @@ public:
 	std::vector < unsigned short > Lengths;		// 2 bytes per segment
 
 	//PHASE PROBS
-	std::vector < bool > ProbMask;
-	std::vector < float > ProbStored;
-	std::vector < float > ProbMissing;
+	shapeit_genotype_storage_v1 * Storage;
 
 	//METHODS
 	genotype(unsigned int);
