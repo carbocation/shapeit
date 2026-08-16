@@ -30,12 +30,6 @@ conditioning_set::conditioning_set() {
 }
 
 conditioning_set::~conditioning_set() {
-	if (nthread > 1) {
-		i_worker = 0;
-		i_job = 0;
-		pthread_mutex_destroy(&mutex_workers);
-		id_workers.clear();
-	}
 	depth = 0;
 	nthread = 0;
 	sites_pbwt_mthreading.clear();
@@ -74,12 +68,6 @@ void conditioning_set::initialize(variant_map & V, float _modulo_selection, floa
 	//SETTING PARAMETERS
 	depth = _depth;
 	nthread = _nthread;
-	if (nthread > 1) {
-		i_worker = 0;
-		i_job = 0;
-		id_workers = vector < pthread_t > (nthread);
-		pthread_mutex_init(&mutex_workers, NULL);
-	}
 
 	//MAPPING EVAL+GRP
 	int n_evaluated = 0;

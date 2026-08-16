@@ -1,6 +1,11 @@
 use core::slice;
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::thread;
 
-use crate::genotype::LogicalRng;
+use crate::bitmatrix::shapeit_bitmatrix_transpose_v1;
+use crate::genotype::{GenotypeGraphV1, LogicalRng};
 use crate::ibd2::Ibd2TracksV1;
 
 const ABI_VERSION: u32 = 1;
@@ -10,6 +15,16 @@ const STATUS_INVALID_DIMENSIONS: u32 = 2;
 const STATUS_OUT_OF_BOUNDS: u32 = 3;
 const STATUS_INTEGER_OVERFLOW: u32 = 4;
 const STATUS_INSUFFICIENT_STATES: u32 = 5;
+const STATUS_THREAD_FAILURE: u32 = 6;
+
+pub type PbwtProgressV1 = unsafe extern "C" fn(usize, usize, *mut c_void);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PbwtBatchResultV1 {
+    completed: usize,
+    failed_chunk: usize,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SolveLayout {
@@ -848,6 +863,297 @@ pub unsafe extern "C" fn shapeit_pbwt_solve_chunk_v1(
         scores,
     });
     STATUS_OK
+}
+
+struct SyncVariantViews(Vec<*const u8>);
+
+// Graph variant allocations remain live and immutable throughout the initial
+// PBWT sweep.
+unsafe impl Sync for SyncVariantViews {}
+
+struct SolveAllShared<'a> {
+    variant_major_address: usize,
+    variant_major_length: usize,
+    variant_major_stride: usize,
+    site_count: usize,
+    haplotype_count: usize,
+    variant_views: &'a SyncVariantViews,
+    variants_length: usize,
+    site_chunks: &'a [i32],
+    chunk_starts: &'a [i32],
+    buffers: &'a [Vec<u8>],
+    scores: &'a [f32],
+    progress: Option<PbwtProgressV1>,
+    progress_context_address: usize,
+    next_chunk: AtomicUsize,
+    completed: AtomicUsize,
+    status: AtomicU32,
+    failed_chunk: AtomicUsize,
+    serialized_progress: Mutex<()>,
+}
+
+fn record_solve_all_failure(shared: &SolveAllShared<'_>, status: u32, chunk: usize) {
+    if shared
+        .status
+        .compare_exchange(STATUS_OK, status, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        shared.failed_chunk.store(chunk, Ordering::SeqCst);
+    }
+}
+
+fn run_solve_all_worker(shared: &SolveAllShared<'_>) {
+    loop {
+        if shared.status.load(Ordering::SeqCst) != STATUS_OK {
+            break;
+        }
+        let chunk = shared.next_chunk.fetch_add(1, Ordering::SeqCst);
+        if chunk >= shared.chunk_starts.len() {
+            break;
+        }
+        let buffer_start = match usize::try_from(shared.chunk_starts[chunk]) {
+            Ok(value) => value,
+            Err(_) => {
+                record_solve_all_failure(shared, STATUS_OUT_OF_BOUNDS, chunk);
+                break;
+            }
+        };
+        let buffer = &shared.buffers[chunk];
+        let status = unsafe {
+            shapeit_pbwt_solve_chunk_v1(
+                shared.variant_major_address as *mut u8,
+                shared.variant_major_length,
+                shared.variant_major_stride,
+                shared.site_count,
+                shared.haplotype_count,
+                shared.variant_views.0.as_ptr(),
+                shared.variant_views.0.len(),
+                shared.variants_length,
+                shared.site_chunks.as_ptr(),
+                shared.site_chunks.len(),
+                chunk,
+                buffer_start,
+                buffer.as_ptr(),
+                buffer.len(),
+                shared.scores.as_ptr(),
+                shared.scores.len(),
+            )
+        };
+        if status != STATUS_OK {
+            record_solve_all_failure(shared, status, chunk);
+            break;
+        }
+        let _guard = match shared.serialized_progress.lock() {
+            Ok(value) => value,
+            Err(_) => {
+                record_solve_all_failure(shared, STATUS_THREAD_FAILURE, chunk);
+                break;
+            }
+        };
+        let completed = shared.completed.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(progress) = shared.progress {
+            unsafe {
+                progress(
+                    completed,
+                    shared.chunk_starts.len(),
+                    shared.progress_context_address as *mut c_void,
+                );
+            }
+        }
+    }
+}
+
+#[no_mangle]
+/// Run and transpose the complete initial PBWT phasing sweep on scoped Rust
+/// worker threads. Immutable prefix snapshots are created before any chunk
+/// writes begin.
+///
+/// # Safety
+///
+/// Graph pointers and all input buffers must remain live and immutable until
+/// return. Graphs must be distinct. Variant-major and haplotype-major matrices
+/// must be writable, non-overlapping, and valid for their stated layouts.
+pub unsafe extern "C" fn shapeit_pbwt_solve_all_v1(
+    worker_count: usize,
+    variant_major: *mut u8,
+    variant_major_length: usize,
+    variant_major_rows: usize,
+    variant_major_stride: usize,
+    site_count: usize,
+    haplotype_count: usize,
+    graphs: *const *mut GenotypeGraphV1,
+    graph_count: usize,
+    site_chunks: *const i32,
+    site_chunks_length: usize,
+    chunk_starts: *const i32,
+    chunk_count: usize,
+    scores: *const f32,
+    scores_length: usize,
+    haplotype_major: *mut u8,
+    haplotype_major_length: usize,
+    haplotype_major_rows: usize,
+    haplotype_major_stride: usize,
+    progress: Option<PbwtProgressV1>,
+    progress_context: *mut c_void,
+    result: *mut PbwtBatchResultV1,
+) -> u32 {
+    if result.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    if worker_count == 0 || graph_count == 0 || chunk_count == 0 {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    if variant_major.is_null()
+        || graphs.is_null()
+        || site_chunks.is_null()
+        || chunk_starts.is_null()
+        || scores.is_null()
+        || haplotype_major.is_null()
+    {
+        return STATUS_NULL_POINTER;
+    }
+    let graphs = slice::from_raw_parts(graphs, graph_count);
+    let site_chunks = slice::from_raw_parts(site_chunks, site_chunks_length);
+    let chunk_starts = slice::from_raw_parts(chunk_starts, chunk_count);
+    let scores = slice::from_raw_parts(scores, scores_length);
+    if site_chunks.len() != site_count
+        || chunk_starts.iter().any(|&start| start < 0)
+        || graphs.iter().any(|graph| graph.is_null())
+    {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    let target_haplotype_count = match graph_count.checked_mul(2) {
+        Some(value) => value,
+        None => return STATUS_INTEGER_OVERFLOW,
+    };
+    if target_haplotype_count > haplotype_count {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    let mut variants_length = None;
+    let mut variant_views = Vec::with_capacity(graph_count);
+    for &graph in graphs {
+        let graph = &*graph;
+        if graph.hmm_dimensions().0 != site_count {
+            return STATUS_INVALID_DIMENSIONS;
+        }
+        let variants = graph.packed_variants();
+        if variants_length.is_some_and(|expected| expected != variants.len()) {
+            return STATUS_INVALID_DIMENSIONS;
+        }
+        variants_length = Some(variants.len());
+        variant_views.push(variants.as_ptr());
+    }
+    let variant_views = SyncVariantViews(variant_views);
+
+    let variant_major_bytes = match variant_major_rows.checked_mul(variant_major_stride) {
+        Some(value) => value,
+        None => return STATUS_INTEGER_OVERFLOW,
+    };
+    if variant_major_bytes > variant_major_length {
+        return STATUS_OUT_OF_BOUNDS;
+    }
+    let variant_major_slice = slice::from_raw_parts(variant_major, variant_major_length);
+    let mut buffers = Vec::with_capacity(chunk_count);
+    for (chunk, &chunk_start) in chunk_starts.iter().enumerate() {
+        let first_current = match site_chunks.iter().position(|&value| value == chunk as i32) {
+            Some(value) => value,
+            None => return STATUS_INVALID_DIMENSIONS,
+        };
+        let buffer_start = chunk_start as usize;
+        if buffer_start > first_current {
+            return STATUS_INVALID_DIMENSIONS;
+        }
+        let byte_start = match buffer_start.checked_mul(variant_major_stride) {
+            Some(value) => value,
+            None => return STATUS_INTEGER_OVERFLOW,
+        };
+        let byte_stop = match first_current.checked_mul(variant_major_stride) {
+            Some(value) => value,
+            None => return STATUS_INTEGER_OVERFLOW,
+        };
+        if byte_stop > variant_major_slice.len() {
+            return STATUS_OUT_OF_BOUNDS;
+        }
+        buffers.push(variant_major_slice[byte_start..byte_stop].to_vec());
+    }
+
+    let shared = SolveAllShared {
+        variant_major_address: variant_major as usize,
+        variant_major_length,
+        variant_major_stride,
+        site_count,
+        haplotype_count,
+        variant_views: &variant_views,
+        variants_length: variants_length.unwrap_or(0),
+        site_chunks,
+        chunk_starts,
+        buffers: &buffers,
+        scores,
+        progress,
+        progress_context_address: progress_context as usize,
+        next_chunk: AtomicUsize::new(0),
+        completed: AtomicUsize::new(0),
+        status: AtomicU32::new(STATUS_OK),
+        failed_chunk: AtomicUsize::new(usize::MAX),
+        serialized_progress: Mutex::new(()),
+    };
+    let execution_threads = core::cmp::min(worker_count, chunk_count);
+    if execution_threads == 1 {
+        run_solve_all_worker(&shared);
+    } else {
+        thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(execution_threads);
+            for _ in 0..execution_threads {
+                let shared = &shared;
+                match thread::Builder::new().spawn_scoped(scope, move || {
+                    run_solve_all_worker(shared);
+                }) {
+                    Ok(handle) => handles.push(handle),
+                    Err(_) => record_solve_all_failure(shared, STATUS_THREAD_FAILURE, usize::MAX),
+                }
+            }
+            for handle in handles {
+                if handle.join().is_err() {
+                    record_solve_all_failure(&shared, STATUS_THREAD_FAILURE, usize::MAX);
+                }
+            }
+        });
+    }
+    let status = shared.status.load(Ordering::SeqCst);
+    *result = PbwtBatchResultV1 {
+        completed: shared.completed.load(Ordering::SeqCst),
+        failed_chunk: shared.failed_chunk.load(Ordering::SeqCst),
+    };
+    if status != STATUS_OK {
+        return status;
+    }
+
+    let max_rows = match site_count.checked_add(7) {
+        Some(value) => value & !7,
+        None => return STATUS_INTEGER_OVERFLOW,
+    };
+    let max_cols = match target_haplotype_count.checked_add(7) {
+        Some(value) => value & !7,
+        None => return STATUS_INTEGER_OVERFLOW,
+    };
+    let required_haplotype_major = match haplotype_major_rows.checked_mul(haplotype_major_stride) {
+        Some(value) => value,
+        None => return STATUS_INTEGER_OVERFLOW,
+    };
+    if haplotype_major_rows < max_cols || required_haplotype_major > haplotype_major_length {
+        return STATUS_OUT_OF_BOUNDS;
+    }
+    shapeit_bitmatrix_transpose_v1(
+        variant_major,
+        variant_major_length,
+        variant_major_rows,
+        variant_major_stride,
+        max_rows,
+        max_cols,
+        haplotype_major,
+        haplotype_major_length,
+        haplotype_major_stride,
+    )
 }
 
 #[no_mangle]

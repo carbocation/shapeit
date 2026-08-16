@@ -38,16 +38,3 @@ uint32_t genotype::setHetsAsMissing() {
 	}
 	return nreset;
 }
-
-void genotype::build() {
-	if (Graph == nullptr) throw runtime_error("Genotype variants have not been allocated");
-	uint32_t status = shapeit_genotype_graph_build_in_place_v1(Graph);
-	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
-		throw runtime_error("Rust genotype graph construction rejected the packed variants (status " +
-			to_string(status) + ")");
-	}
-	const shapeit_genotype_graph_view_v1 view = graphView();
-	if (view.variant_count != n_variants) {
-		throw runtime_error("Rust genotype graph returned an inconsistent variant count");
-	}
-}

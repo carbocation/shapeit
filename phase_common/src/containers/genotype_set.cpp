@@ -90,9 +90,32 @@ unsigned long genotype_set::numberOfSegments() {
 	return size;
 }
 
-void genotype_set::solve() {
+void genotype_set::build(int n_thread) {
 	tac.clock();
-	for (int i = 0 ; i < vecG.size() ; i ++) vecG[i]->solve();
+	vector < shapeit_genotype_graph_v1 * > graphs(n_ind, nullptr);
+	for (int i = 0 ; i < n_ind ; i ++) graphs[i] = vecG[i]->Graph;
+	shapeit_genotype_batch_result_v1 result = {};
+	const uint32_t status = shapeit_genotype_graphs_build_v1(
+		n_thread, graphs.data(), graphs.size(), nullptr, nullptr, &result);
+	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
+		throw runtime_error("Rust genotype graph batch construction failed (status " +
+			to_string(status) + ")");
+	}
+	vrb.bullet("Build genotype graphs [seg=" + stb.str(result.segments) + "] (" +
+		stb.str(tac.rel_time()*0.001, 2) + "s)");
+}
+
+void genotype_set::solve(int n_thread) {
+	tac.clock();
+	vector < shapeit_genotype_graph_v1 * > graphs(n_ind, nullptr);
+	for (int i = 0 ; i < n_ind ; i ++) graphs[i] = vecG[i]->Graph;
+	shapeit_genotype_batch_result_v1 result = {};
+	const uint32_t status = shapeit_genotype_graphs_solve_current_v1(
+		n_thread, graphs.data(), graphs.size(), nullptr, nullptr, &result);
+	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
+		throw runtime_error("Rust genotype graph batch solver failed (status " +
+			to_string(status) + ")");
+	}
 	vrb.bullet("HAP solving (" + stb.str(tac.rel_time()*1.0/1000, 2) + "s)");
 }
 

@@ -55,6 +55,13 @@ the packed allocation is created before HTSlib parsing and exposed as one
 stable mutable span for input initialization. C++ consumers otherwise receive
 short-lived read-only views rather than parallel mutable containers.
 
+`shapeit_genotype_graphs_build_v1` schedules construction of every sample graph
+on scoped Rust threads and reports aggregate segment counts. Its matching
+`shapeit_genotype_graphs_solve_current_v1` entry point schedules final
+maximum-probability path decoding for the complete graph set. C++ supplies the
+opaque graph handles and serialized progress callback but owns neither worker
+state nor sample scheduling.
+
 `shapeit_genotype_sample_v1` samples a complete graph in one call, including
 forward/backward transition sampling, missing-genotype imputation, and applying
 ambiguity codes to the packed haplotypes. It reconstructs the caller's fresh
@@ -144,9 +151,12 @@ PBWT neighbour selection. C++ no longer stores or flattens nested track vectors.
 
 `shapeit_pbwt_solve_chunk_v1` owns one complete PBWT initialization chunk,
 including prefix replay, heterozygote and missing-genotype resolution, and PBWT
-ordering/divergence updates. C++ retains only chunk scheduling and progress
-reporting. Parallel chunks consume immutable prefix snapshots and write disjoint
-locus rows, so logical results do not depend on worker assignment.
+ordering/divergence updates. `shapeit_pbwt_solve_all_v1` snapshots every
+immutable prefix, schedules all chunks on scoped Rust threads, and transposes
+the completed target haplotypes into haplotype-major layout. C++ supplies the
+graph handles, chunk metadata, score array, and serialized progress callback.
+Parallel chunks write disjoint locus rows, so logical results do not depend on
+worker assignment.
 
 `shapeit_pbwt_select_sites_v1` first chooses one evaluated locus per PBWT group
 from stable group-specific Philox streams. `shapeit_pbwt_select_chunk_v1` then

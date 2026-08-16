@@ -51,12 +51,6 @@ public:
 
 	//SOLVER DATA
 	std::vector < float > scoreBit;
-	std::vector < std::vector < unsigned char > > solve_buffers;
-
-	//MULTI-THREADING
-	int i_worker, i_job, d_job;
-	pthread_mutex_t mutex_workers;
-	std::vector < pthread_t > id_workers;
 
 	//CONSTRUCTOR/DESTRUCTOR
 	conditioning_set();
@@ -68,7 +62,6 @@ public:
 
 	//STATES PROCESSING
 	//PBWT PHASING SWEEP
-	void solve(int chunk, genotype_set *);
 	void solve(genotype_set *);
 
 };

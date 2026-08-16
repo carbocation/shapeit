@@ -29,7 +29,7 @@ void phaser::write_files_and_finalise() {
 	vrb.title("Finalization:");
 
 	//
-	G.solve();
+	G.solve(options["thread"].as < int > ());
 	H.updateHaplotypes(G);
 	H.transposeHaplotypes_H2V(false);
 

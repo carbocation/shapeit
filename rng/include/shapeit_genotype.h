@@ -11,6 +11,7 @@
 #define SHAPEIT_GENOTYPE_STATUS_INVALID_DIMENSIONS 2U
 #define SHAPEIT_GENOTYPE_STATUS_OUT_OF_BOUNDS 3U
 #define SHAPEIT_GENOTYPE_STATUS_INTEGER_OVERFLOW 4U
+#define SHAPEIT_GENOTYPE_STATUS_THREAD_FAILURE 5U
 
 #define SHAPEIT_GENOTYPE_PEDIGREE_TRIO 0U
 #define SHAPEIT_GENOTYPE_PEDIGREE_FATHER 1U
@@ -39,6 +40,17 @@ typedef struct shapeit_genotype_storage_view_v1 {
     size_t missing_probabilities_length;
     uint32_t storage_events;
 } shapeit_genotype_storage_view_v1;
+
+typedef void (*shapeit_genotype_progress_v1)(
+    size_t completed,
+    size_t total,
+    void * context);
+
+typedef struct shapeit_genotype_batch_result_v1 {
+    size_t completed;
+    size_t failed_graph;
+    size_t segments;
+} shapeit_genotype_batch_result_v1;
 
 typedef struct shapeit_genotype_storage_v1 shapeit_genotype_storage_v1;
 typedef struct shapeit_genotype_graph_v1 shapeit_genotype_graph_v1;
@@ -112,6 +124,14 @@ uint32_t shapeit_genotype_graph_require_double_v1(
 
 uint32_t shapeit_genotype_graph_build_in_place_v1(
     shapeit_genotype_graph_v1 * graph);
+
+uint32_t shapeit_genotype_graphs_build_v1(
+    size_t worker_count,
+    shapeit_genotype_graph_v1 * const * graphs,
+    size_t graph_count,
+    shapeit_genotype_progress_v1 progress,
+    void * progress_context,
+    shapeit_genotype_batch_result_v1 * result);
 
 uint32_t shapeit_genotype_graph_borrow_v1(
     const shapeit_genotype_graph_v1 * graph,
@@ -275,6 +295,14 @@ uint32_t shapeit_genotype_graph_solve_v1(
 
 uint32_t shapeit_genotype_graph_solve_current_v1(
     shapeit_genotype_graph_v1 * graph);
+
+uint32_t shapeit_genotype_graphs_solve_current_v1(
+    size_t worker_count,
+    shapeit_genotype_graph_v1 * const * graphs,
+    size_t graph_count,
+    shapeit_genotype_progress_v1 progress,
+    void * progress_context,
+    shapeit_genotype_batch_result_v1 * result);
 
 uint32_t shapeit_genotype_windows_v1(
     const uint8_t * variants,

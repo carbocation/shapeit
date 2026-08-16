@@ -1,4 +1,8 @@
 use core::slice;
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::thread;
 
 const ABI_VERSION: u32 = 1;
 pub(crate) const STATUS_OK: u32 = 0;
@@ -6,6 +10,7 @@ pub(crate) const STATUS_NULL_POINTER: u32 = 1;
 pub(crate) const STATUS_INVALID_DIMENSIONS: u32 = 2;
 pub(crate) const STATUS_OUT_OF_BOUNDS: u32 = 3;
 pub(crate) const STATUS_INTEGER_OVERFLOW: u32 = 4;
+const STATUS_THREAD_FAILURE: u32 = 5;
 
 const MAX_AMBIGUOUS_PER_SEGMENT: usize = 22;
 const MASK_INIT: u64 = u64::MAX;
@@ -129,6 +134,16 @@ pub struct GenotypeStorageV1 {
     storage_events: u32,
 }
 
+pub type GenotypeProgressV1 = unsafe extern "C" fn(usize, usize, *mut c_void);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GenotypeBatchResultV1 {
+    completed: usize,
+    failed_graph: usize,
+    segments: usize,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct GenotypeGraphViewV1 {
@@ -183,6 +198,10 @@ impl GenotypeGraphV1 {
             &self.segment_lengths,
             &self.diplotypes,
         )
+    }
+
+    pub(crate) fn packed_variants(&self) -> &[u8] {
+        &self.variants
     }
 
     pub(crate) fn hmm_dimensions(&self) -> (usize, usize, usize) {
@@ -2818,6 +2837,212 @@ pub unsafe extern "C" fn shapeit_genotype_graph_solve_current_v1(
     }
     let haploid = u8::from((*graph).haploid);
     shapeit_genotype_graph_solve_v1(graph, haploid)
+}
+
+#[derive(Clone, Copy)]
+enum GenotypeBatchOperation {
+    Build,
+    Solve,
+}
+
+struct GenotypeBatchShared<'a> {
+    graph_addresses: &'a [usize],
+    operation: GenotypeBatchOperation,
+    progress: Option<GenotypeProgressV1>,
+    progress_context_address: usize,
+    next_graph: AtomicUsize,
+    completed: AtomicUsize,
+    status: AtomicU32,
+    failed_graph: AtomicUsize,
+    serialized_progress: Mutex<()>,
+}
+
+fn record_batch_failure(shared: &GenotypeBatchShared<'_>, status: u32, graph: usize) {
+    if shared
+        .status
+        .compare_exchange(STATUS_OK, status, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        shared.failed_graph.store(graph, Ordering::SeqCst);
+    }
+}
+
+fn run_genotype_batch_worker(shared: &GenotypeBatchShared<'_>) {
+    loop {
+        if shared.status.load(Ordering::SeqCst) != STATUS_OK {
+            break;
+        }
+        let index = shared.next_graph.fetch_add(1, Ordering::SeqCst);
+        if index >= shared.graph_addresses.len() {
+            break;
+        }
+        let graph = shared.graph_addresses[index] as *mut GenotypeGraphV1;
+        let status = unsafe {
+            match shared.operation {
+                GenotypeBatchOperation::Build => match (*graph).build_in_place() {
+                    Ok(()) => STATUS_OK,
+                    Err(status) => status,
+                },
+                GenotypeBatchOperation::Solve => shapeit_genotype_graph_solve_current_v1(graph),
+            }
+        };
+        if status != STATUS_OK {
+            record_batch_failure(shared, status, index);
+            break;
+        }
+        let _guard = match shared.serialized_progress.lock() {
+            Ok(value) => value,
+            Err(_) => {
+                record_batch_failure(shared, STATUS_THREAD_FAILURE, index);
+                break;
+            }
+        };
+        let completed = shared.completed.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(progress) = shared.progress {
+            unsafe {
+                progress(
+                    completed,
+                    shared.graph_addresses.len(),
+                    shared.progress_context_address as *mut c_void,
+                );
+            }
+        }
+    }
+}
+
+unsafe fn run_genotype_batch(
+    worker_count: usize,
+    graphs: *const *mut GenotypeGraphV1,
+    graph_count: usize,
+    progress: Option<GenotypeProgressV1>,
+    progress_context: *mut c_void,
+    result: *mut GenotypeBatchResultV1,
+    operation: GenotypeBatchOperation,
+) -> u32 {
+    if result.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    if worker_count == 0 || graph_count == 0 {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    if graphs.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let graphs = slice::from_raw_parts(graphs, graph_count);
+    if graphs.iter().any(|graph| graph.is_null()) {
+        return STATUS_NULL_POINTER;
+    }
+    let graph_addresses: Vec<usize> = graphs.iter().map(|&graph| graph as usize).collect();
+    let shared = GenotypeBatchShared {
+        graph_addresses: &graph_addresses,
+        operation,
+        progress,
+        progress_context_address: progress_context as usize,
+        next_graph: AtomicUsize::new(0),
+        completed: AtomicUsize::new(0),
+        status: AtomicU32::new(STATUS_OK),
+        failed_graph: AtomicUsize::new(usize::MAX),
+        serialized_progress: Mutex::new(()),
+    };
+    let execution_threads = core::cmp::min(worker_count, graph_count);
+    if execution_threads == 1 {
+        run_genotype_batch_worker(&shared);
+    } else {
+        thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(execution_threads);
+            for _ in 0..execution_threads {
+                let shared = &shared;
+                match thread::Builder::new().spawn_scoped(scope, move || {
+                    run_genotype_batch_worker(shared);
+                }) {
+                    Ok(handle) => handles.push(handle),
+                    Err(_) => record_batch_failure(shared, STATUS_THREAD_FAILURE, usize::MAX),
+                }
+            }
+            for handle in handles {
+                if handle.join().is_err() {
+                    record_batch_failure(&shared, STATUS_THREAD_FAILURE, usize::MAX);
+                }
+            }
+        });
+    }
+    let status = shared.status.load(Ordering::SeqCst);
+    let mut segments = 0usize;
+    if status == STATUS_OK {
+        for &address in &graph_addresses {
+            segments = match segments
+                .checked_add((*(address as *const GenotypeGraphV1)).segment_lengths.len())
+            {
+                Some(value) => value,
+                None => {
+                    *result = GenotypeBatchResultV1 {
+                        completed: shared.completed.load(Ordering::SeqCst),
+                        failed_graph: usize::MAX,
+                        segments: 0,
+                    };
+                    return STATUS_INTEGER_OVERFLOW;
+                }
+            };
+        }
+    }
+    *result = GenotypeBatchResultV1 {
+        completed: shared.completed.load(Ordering::SeqCst),
+        failed_graph: shared.failed_graph.load(Ordering::SeqCst),
+        segments,
+    };
+    status
+}
+
+#[no_mangle]
+/// Build every Rust-owned genotype graph on scoped Rust worker threads.
+///
+/// # Safety
+///
+/// Every graph pointer must be live, distinct, and exclusively borrowed until
+/// the call returns. `result` must be writable.
+pub unsafe extern "C" fn shapeit_genotype_graphs_build_v1(
+    worker_count: usize,
+    graphs: *const *mut GenotypeGraphV1,
+    graph_count: usize,
+    progress: Option<GenotypeProgressV1>,
+    progress_context: *mut c_void,
+    result: *mut GenotypeBatchResultV1,
+) -> u32 {
+    run_genotype_batch(
+        worker_count,
+        graphs,
+        graph_count,
+        progress,
+        progress_context,
+        result,
+        GenotypeBatchOperation::Build,
+    )
+}
+
+#[no_mangle]
+/// Solve every Rust-owned genotype graph from its accumulated storage.
+///
+/// # Safety
+///
+/// Every graph pointer must be live, distinct, and exclusively borrowed until
+/// the call returns. `result` must be writable.
+pub unsafe extern "C" fn shapeit_genotype_graphs_solve_current_v1(
+    worker_count: usize,
+    graphs: *const *mut GenotypeGraphV1,
+    graph_count: usize,
+    progress: Option<GenotypeProgressV1>,
+    progress_context: *mut c_void,
+    result: *mut GenotypeBatchResultV1,
+) -> u32 {
+    run_genotype_batch(
+        worker_count,
+        graphs,
+        graph_count,
+        progress,
+        progress_context,
+        result,
+        GenotypeBatchOperation::Solve,
+    )
 }
 
 #[no_mangle]

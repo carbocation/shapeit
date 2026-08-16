@@ -48,7 +48,8 @@ public:
 	unsigned int largestNumberOfTransitions();	//Get the number of transitions in the larger genotype graph. Used to initialize memory space for multi-threading.
 	unsigned int largestNumberOfMissings();		//Get the number of transitions in the larger genotype graph. Used to initialize memory space for multi-threading.
 	unsigned long numberOfSegments();			//Total number of segments across all genotype graphs (used for verbose).
-	void solve();								//
+	void build(int);
+	void solve(int);
 	void scaffoldUsingPedigrees(pedigree_reader &);
 	void resetHaploidHeterozgotes(std::vector < std::string > &);
 

@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include <shapeit_ibd2.h>
+#include <shapeit_genotype.h>
 
 #define SHAPEIT_PBWT_ABI_VERSION 1U
 
@@ -14,6 +15,17 @@
 #define SHAPEIT_PBWT_STATUS_OUT_OF_BOUNDS 3U
 #define SHAPEIT_PBWT_STATUS_INTEGER_OVERFLOW 4U
 #define SHAPEIT_PBWT_STATUS_INSUFFICIENT_STATES 5U
+#define SHAPEIT_PBWT_STATUS_THREAD_FAILURE 6U
+
+typedef void (*shapeit_pbwt_progress_v1)(
+    size_t completed,
+    size_t total,
+    void * context);
+
+typedef struct shapeit_pbwt_batch_result_v1 {
+    size_t completed;
+    size_t failed_chunk;
+} shapeit_pbwt_batch_result_v1;
 
 #ifdef __cplusplus
 extern "C" {
@@ -50,6 +62,30 @@ uint32_t shapeit_pbwt_solve_chunk_v1(
     size_t buffer_length,
     const float * scores,
     size_t scores_length);
+
+uint32_t shapeit_pbwt_solve_all_v1(
+    size_t worker_count,
+    uint8_t * variant_major,
+    size_t variant_major_length,
+    size_t variant_major_rows,
+    size_t variant_major_stride,
+    size_t site_count,
+    size_t haplotype_count,
+    shapeit_genotype_graph_v1 * const * graphs,
+    size_t graph_count,
+    const int32_t * site_chunks,
+    size_t site_chunks_length,
+    const int32_t * chunk_starts,
+    size_t chunk_count,
+    const float * scores,
+    size_t scores_length,
+    uint8_t * haplotype_major,
+    size_t haplotype_major_length,
+    size_t haplotype_major_rows,
+    size_t haplotype_major_stride,
+    shapeit_pbwt_progress_v1 progress,
+    void * progress_context,
+    shapeit_pbwt_batch_result_v1 * result);
 
 uint32_t shapeit_pbwt_select_chunk_v1(
     const uint8_t * haplotypes,

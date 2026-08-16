@@ -60,8 +60,6 @@ public:
 	~genotype();
 	void allocateVariants(unsigned int);
 	void free();
-	void build();
-	void solve();
 	void scaffoldTrio(genotype *, genotype *, std::vector < unsigned int > &);
 	void scaffoldDuoFather(genotype *, std::vector < unsigned int > &);
 	void scaffoldDuoMother(genotype *, std::vector < unsigned int > &);

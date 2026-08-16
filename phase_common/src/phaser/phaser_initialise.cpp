@@ -28,7 +28,6 @@
 #include <io/gmap_reader.h>
 #include <io/pedigree_reader.h>
 #include <io/haploid_reader.h>
-#include <modules/genotype_builder.h>
 
 using namespace std;
 
@@ -102,7 +101,7 @@ void phaser::read_files_and_initialise() {
 	if (!options.count("pbwt-disable-init")) H.solve(&G);
 
 	//step8: Initialize genotype structures
-	genotype_builder(G, options["thread"].as < int > ()).build();
+	G.build(options["thread"].as < int > ());
 
 	//step9: Allocate persistent Rust workers for common-phasing iterations
 	vector < shapeit_genotype_graph_v1 * > graphs(G.n_ind, nullptr);
