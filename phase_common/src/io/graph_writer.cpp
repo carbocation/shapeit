@@ -23,6 +23,7 @@
 #include <io/graph_writer.h>
 #include <shapeit_genotype.h>
 
+#include <limits>
 #include <stdexcept>
 
 using namespace std;
@@ -60,25 +61,40 @@ void graph_writer::writeGraphs(string fname) {
 	fd.write(reinterpret_cast<char*>(&G.n_ind), sizeof(G.n_ind));
 	for (int g  = 0 ; g < G.n_ind ; g++) {
 		static_assert(sizeof(unsigned long) == sizeof(uint64_t));
+		static_assert(sizeof(unsigned int) == sizeof(uint32_t));
 		const shapeit_genotype_graph_view_v1 graph = G.vecG[g]->graphView();
-		if (graph.variant_count != G.vecG[g]->n_variants ||
-			graph.segment_lengths_length != G.vecG[g]->n_segments ||
-			graph.ambiguous_length != G.vecG[g]->n_ambiguous ||
-			graph.missing_count != G.vecG[g]->n_missing ||
-			graph.transition_count != G.vecG[g]->n_transitions) {
+		shapeit_genotype_storage_view_v1 view = {};
+		const uint32_t status = shapeit_genotype_graph_storage_borrow_v1(G.vecG[g]->Graph, &view);
+		if (status != SHAPEIT_GENOTYPE_STATUS_OK ||
+			view.transition_count != graph.transition_count ||
+			view.transition_mask_length != (view.transition_count + 7) / 8 ||
+			view.missing_probabilities_length != graph.missing_count * HAP_NUMBER) {
 			throw runtime_error("Rust genotype graph returned inconsistent writer metadata");
 		}
+		if (graph.segment_lengths_length > numeric_limits < unsigned int >::max() ||
+			graph.variant_count > numeric_limits < unsigned int >::max() ||
+			graph.ambiguous_length > numeric_limits < unsigned int >::max() ||
+			graph.missing_count > numeric_limits < unsigned int >::max() ||
+			view.transition_probabilities_length > numeric_limits < unsigned int >::max())
+			throw runtime_error("Rust genotype graph exceeds the legacy writer format");
+		const unsigned int n_segments = graph.segment_lengths_length;
+		const unsigned int n_variants_graph = graph.variant_count;
+		const unsigned int n_ambiguous = graph.ambiguous_length;
+		const unsigned int n_missing = graph.missing_count;
+		const unsigned int n_transitions = graph.transition_count;
+		const unsigned int n_stored_transitionProbs = view.transition_probabilities_length;
+		const unsigned int n_storage_events = view.storage_events;
 		// name
 		string_write(fd, G.vecG[g]->name);
 		// integers
 		fd.write(reinterpret_cast<char*>(&G.vecG[g]->index), sizeof(G.vecG[g]->index));
-		fd.write(reinterpret_cast<char*>(&G.vecG[g]->n_segments), sizeof(G.vecG[g]->n_segments));
-		fd.write(reinterpret_cast<char*>(&G.vecG[g]->n_variants), sizeof(G.vecG[g]->n_variants));
-		fd.write(reinterpret_cast<char*>(&G.vecG[g]->n_ambiguous), sizeof(G.vecG[g]->n_ambiguous));
-		fd.write(reinterpret_cast<char*>(&G.vecG[g]->n_missing), sizeof(G.vecG[g]->n_missing));
-		fd.write(reinterpret_cast<char*>(&G.vecG[g]->n_transitions), sizeof(G.vecG[g]->n_transitions));
-		fd.write(reinterpret_cast<char*>(&G.vecG[g]->n_stored_transitionProbs), sizeof(G.vecG[g]->n_stored_transitionProbs));
-		fd.write(reinterpret_cast<char*>(&G.vecG[g]->n_storage_events), sizeof(G.vecG[g]->n_storage_events));
+		fd.write(reinterpret_cast<const char *>(&n_segments), sizeof(n_segments));
+		fd.write(reinterpret_cast<const char *>(&n_variants_graph), sizeof(n_variants_graph));
+		fd.write(reinterpret_cast<const char *>(&n_ambiguous), sizeof(n_ambiguous));
+		fd.write(reinterpret_cast<const char *>(&n_missing), sizeof(n_missing));
+		fd.write(reinterpret_cast<const char *>(&n_transitions), sizeof(n_transitions));
+		fd.write(reinterpret_cast<const char *>(&n_stored_transitionProbs), sizeof(n_stored_transitionProbs));
+		fd.write(reinterpret_cast<const char *>(&n_storage_events), sizeof(n_storage_events));
 
 		// vectors
 		if (graph.variants_length)
@@ -89,16 +105,6 @@ void graph_writer::writeGraphs(string fname) {
 			fd.write(reinterpret_cast<const char *>(graph.diplotypes), graph.diplotypes_length * sizeof(uint64_t));
 		if (graph.segment_lengths_length)
 			fd.write(reinterpret_cast<const char *>(graph.segment_lengths), graph.segment_lengths_length * sizeof(uint16_t));
-		shapeit_genotype_storage_view_v1 view = {};
-		const uint32_t status = shapeit_genotype_graph_storage_borrow_v1(G.vecG[g]->Graph, &view);
-		if (status != SHAPEIT_GENOTYPE_STATUS_OK ||
-			view.transition_count != G.vecG[g]->n_transitions ||
-			view.transition_mask_length != (view.transition_count + 7) / 8 ||
-			view.transition_probabilities_length != G.vecG[g]->n_stored_transitionProbs ||
-			view.missing_probabilities_length != G.vecG[g]->n_missing * HAP_NUMBER ||
-			view.storage_events != G.vecG[g]->n_storage_events) {
-			throw runtime_error("Rust genotype storage returned an invalid graph-writer view");
-		}
 		const vector<bool>::size_type transition_count = view.transition_count;
 		fd.write(reinterpret_cast<const char *>(&transition_count), sizeof(transition_count));
 		if (view.transition_mask_length)

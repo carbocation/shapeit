@@ -47,8 +47,7 @@ void genotype::build() {
 			to_string(status) + ")");
 	}
 	const shapeit_genotype_graph_view_v1 view = graphView();
-	n_segments = view.segment_lengths_length;
-	n_ambiguous = view.ambiguous_length;
-	n_missing = view.missing_count;
-	n_transitions = view.transition_count;
+	if (view.variant_count != n_variants) {
+		throw runtime_error("Rust genotype graph returned an inconsistent variant count");
+	}
 }

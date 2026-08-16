@@ -69,7 +69,7 @@ void genotype_set::imputeMonomorphic(variant_map & V) {
 unsigned int genotype_set::largestNumberOfTransitions() {
 	unsigned int maxT = 0;
 	for (int i = 0 ; i < n_ind ; i ++) {
-		unsigned int nTrans = vecG[i]->n_transitions;
+		unsigned int nTrans = vecG[i]->graphView().transition_count;
 		if (nTrans > maxT) maxT = nTrans;
 	}
 	return maxT;
@@ -78,7 +78,7 @@ unsigned int genotype_set::largestNumberOfTransitions() {
 unsigned int genotype_set::largestNumberOfMissings() {
 	unsigned int maxM = 0;
 	for (int i = 0 ; i < n_ind ; i ++) {
-		unsigned int nMis = vecG[i]->n_missing * HAP_NUMBER;
+		unsigned int nMis = vecG[i]->graphView().missing_count * HAP_NUMBER;
 		if (nMis> maxM) maxM = nMis;
 	}
 	return maxM;
@@ -86,7 +86,7 @@ unsigned int genotype_set::largestNumberOfMissings() {
 
 unsigned long genotype_set::numberOfSegments() {
 	unsigned long size = 0;
-	for (int i = 0 ; i < n_ind ; i ++) size += vecG[i]->n_segments;
+	for (int i = 0 ; i < n_ind ; i ++) size += vecG[i]->graphView().segment_lengths_length;
 	return size;
 }
 
@@ -168,4 +168,3 @@ void genotype_set::resetHaploidHeterozgotes(vector < string > & haploids) {
 	vrb.bullet2("#haploids = " + stb.str(nhaploids) + " / #diploids = " + stb.str(n_ind - nhaploids));
 	vrb.bullet2("Hets set as missing: n=" + stb.str(nreset) + " (" + stb.str(nreset * 100.0 / ntotal, 3) + "%)");
 }
-

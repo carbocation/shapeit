@@ -28,13 +28,7 @@ using namespace std;
 
 genotype::genotype(unsigned int _index) {
 	index = _index;
-	n_segments = 0;
 	n_variants = 0;
-	n_ambiguous = 0;
-	n_missing = 0;
-	n_transitions = 0;
-	n_stored_transitionProbs = 0;
-	n_storage_events = 0;
 	Variants = {};
 	Graph = nullptr;
 	this->name = "";

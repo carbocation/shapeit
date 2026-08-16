@@ -86,7 +86,7 @@ void compute_job::make(unsigned int ind, double min_window_size, random_number_g
 	parameters.struct_size = sizeof(parameters);
 	parameters.variants = graph.variants;
 	parameters.variants_length = graph.variants_length;
-	parameters.variant_count = genotype_graph->n_variants;
+	parameters.variant_count = graph.variant_count;
 	parameters.diplotypes = graph.diplotypes;
 	parameters.diplotypes_length = graph.diplotypes_length;
 	parameters.segment_lengths = graph.segment_lengths;

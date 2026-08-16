@@ -29,13 +29,11 @@
 using namespace std;
 
 void genotype::prune(vector < double > & probabilities, double threshold_probability_mass) {
+	const shapeit_genotype_graph_view_v1 graph = graphView();
 	uint32_t status = shapeit_genotype_graph_prune_v1(
-		Graph, probabilities.data(), n_transitions, threshold_probability_mass);
+		Graph, probabilities.data(), graph.transition_count, threshold_probability_mass);
 	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
 		throw runtime_error("Rust genotype pruning rejected its graph (status " +
 			to_string(status) + ")");
 	}
-	const shapeit_genotype_graph_view_v1 view = graphView();
-	n_segments = view.segment_lengths_length;
-	n_transitions = view.transition_count;
 }

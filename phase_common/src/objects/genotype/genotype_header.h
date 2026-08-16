@@ -49,13 +49,7 @@ public:
 	// INTERNAL DATA
 	std::string name;
 	unsigned int index;						// Index in containers
-	unsigned int n_segments;				// Number of segments
 	unsigned int n_variants;				// Number of variants	(to iterate over Variants)
-	unsigned int n_ambiguous;				// Number of ambiguous variants
-	unsigned int n_missing;					// Number of missing
-	unsigned int n_transitions;				// Number of transitions
-	unsigned int n_stored_transitionProbs;	// Number of transition probabilities stored in memory
-	unsigned int n_storage_events;			// Number of storage having been done
 	bool double_precision;					//If I get underflows using float, move to double
 	bool haploid;							//Is this sample haploid?
 
