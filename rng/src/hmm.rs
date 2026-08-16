@@ -5,9 +5,13 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::thread;
+use std::time::Instant;
 
 use self::single::{shapeit_hmm_run_segment_single_prevalidated_v1, HmmSegmentSingleV1};
-use crate::bitmatrix::shapeit_bitmatrix_subset_transpose_v1;
+use crate::bitmatrix::{
+    shapeit_bitmatrix_refresh_haplotypes_v1, shapeit_bitmatrix_subset_transpose_v1,
+    shapeit_bitmatrix_transpose_v1,
+};
 use crate::conditioning::{
     shapeit_conditioning_graph_job_build_v1, ConditioningGraphBuildV1, ConditioningJobV1,
 };
@@ -15,7 +19,10 @@ use crate::genotype::{
     shapeit_genotype_graph_prune_v1, shapeit_genotype_graph_sample_current_v1,
     shapeit_genotype_graph_store_v1, GenotypeGraphV1, GenotypeWindowV1,
 };
-use crate::ibd2::Ibd2TracksV1;
+use crate::ibd2::{Ibd2StatsV1, Ibd2TracksV1};
+use crate::pbwt::{
+    shapeit_pbwt_select_chunk_v1, shapeit_pbwt_select_sites_v1, shapeit_pbwt_transpose_neighbors_v1,
+};
 
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{
@@ -174,6 +181,54 @@ pub struct CommonIterationV1 {
 }
 
 #[repr(C)]
+pub struct CommonPbwtSelectionV1 {
+    abi_version: u32,
+    struct_size: usize,
+    haplotypes: *const u8,
+    haplotypes_length: usize,
+    haplotype_stride: usize,
+    site_count: usize,
+    haplotype_count: usize,
+    target_individual_count: usize,
+    evaluated_sites: *const u8,
+    evaluated_sites_length: usize,
+    selected_sites: *mut u8,
+    selected_sites_length: usize,
+    site_groups: *const i32,
+    site_groups_length: usize,
+    group_count: usize,
+    site_chunks: *const i32,
+    site_chunks_length: usize,
+    chunk_starts: *const i32,
+    chunk_count: usize,
+    depth: usize,
+    ibd2_registry: *const Ibd2TracksV1,
+    neighbors: *mut i32,
+    neighbors_length: usize,
+    seed: u64,
+    domain: u32,
+    iteration: u32,
+    progress: Option<CommonProgressV1>,
+    progress_context: *mut c_void,
+}
+
+#[repr(C)]
+pub struct CommonFullIterationV1 {
+    abi_version: u32,
+    struct_size: usize,
+    pbwt: CommonPbwtSelectionV1,
+    phase: CommonIterationV1,
+    haplotype_major: *mut u8,
+    haplotype_major_length: usize,
+    haplotype_major_rows: usize,
+    haplotype_major_stride: usize,
+    variant_major: *mut u8,
+    variant_major_length: usize,
+    variant_major_rows: usize,
+    variant_major_stride: usize,
+}
+
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CommonIterationResultV1 {
     underflow_recovered_summing: u64,
@@ -185,6 +240,19 @@ pub struct CommonIterationResultV1 {
     conditioning_states_sd: f64,
     window_megabases_mean: f64,
     window_megabases_sd: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CommonFullIterationResultV1 {
+    phase: CommonIterationResultV1,
+    ibd2: Ibd2StatsV1,
+    failed_pbwt_chunk: usize,
+    pbwt_seconds: f64,
+    hmm_seconds: f64,
+    ibd2_seconds: f64,
+    haplotype_refresh_seconds: f64,
+    transpose_seconds: f64,
 }
 
 #[repr(C)]
@@ -310,6 +378,20 @@ struct CommonIterationShared<'a> {
     fatal_outcome: AtomicI32,
     serialized_output: Mutex<()>,
 }
+
+struct CommonPbwtShared<'a> {
+    parameters: &'a CommonPbwtSelectionV1,
+    chunk_starts: &'a [i32],
+    next_chunk: AtomicUsize,
+    completed_chunks: AtomicUsize,
+    status: AtomicU32,
+    failed_chunk: AtomicUsize,
+    serialized_progress: Mutex<()>,
+}
+
+// All input pointers are immutable for the selection, while output neighbour
+// slabs are disjoint by PBWT chunk. Progress callbacks are serialized.
+unsafe impl Sync for CommonPbwtSelectionV1 {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ScratchLayout {
@@ -2263,6 +2345,320 @@ pub unsafe extern "C" fn shapeit_common_workers_run_iteration_v1(
         window_megabases_sd: window_megabases.standard_deviation(),
     };
     shared.status.load(Ordering::SeqCst)
+}
+
+fn record_pbwt_failure(shared: &CommonPbwtShared<'_>, status: u32, chunk: usize) {
+    if shared
+        .status
+        .compare_exchange(STATUS_OK, status, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        shared.failed_chunk.store(chunk, Ordering::SeqCst);
+    }
+}
+
+fn run_pbwt_worker(shared: &CommonPbwtShared<'_>) {
+    loop {
+        if shared.status.load(Ordering::SeqCst) != STATUS_OK {
+            break;
+        }
+        let chunk = shared.next_chunk.fetch_add(1, Ordering::SeqCst);
+        if chunk >= shared.parameters.chunk_count {
+            break;
+        }
+        let buffer_start = match usize::try_from(shared.chunk_starts[chunk]) {
+            Ok(value) => value,
+            Err(_) => {
+                record_pbwt_failure(shared, STATUS_OUT_OF_BOUNDS, chunk);
+                break;
+            }
+        };
+        let parameters = shared.parameters;
+        let status = unsafe {
+            shapeit_pbwt_select_chunk_v1(
+                parameters.haplotypes,
+                parameters.haplotypes_length,
+                parameters.haplotype_stride,
+                parameters.site_count,
+                parameters.haplotype_count,
+                parameters.target_individual_count,
+                parameters.evaluated_sites,
+                parameters.evaluated_sites_length,
+                parameters.selected_sites,
+                parameters.selected_sites_length,
+                parameters.site_groups,
+                parameters.site_groups_length,
+                parameters.group_count,
+                parameters.site_chunks,
+                parameters.site_chunks_length,
+                chunk,
+                buffer_start,
+                parameters.depth,
+                parameters.ibd2_registry,
+                parameters.neighbors,
+                parameters.neighbors_length,
+            )
+        };
+        if status != STATUS_OK {
+            record_pbwt_failure(shared, status, chunk);
+            break;
+        }
+        let _guard = match shared.serialized_progress.lock() {
+            Ok(value) => value,
+            Err(_) => {
+                record_pbwt_failure(shared, STATUS_THREAD_FAILURE, chunk);
+                break;
+            }
+        };
+        let completed = shared.completed_chunks.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(progress) = parameters.progress {
+            unsafe {
+                progress(
+                    completed,
+                    parameters.chunk_count,
+                    parameters.progress_context,
+                );
+            }
+        }
+    }
+}
+
+unsafe fn run_common_pbwt_selection(
+    worker_count: usize,
+    parameters: &CommonPbwtSelectionV1,
+    failed_chunk: &mut usize,
+) -> u32 {
+    if parameters.abi_version != ABI_VERSION
+        || parameters.struct_size < mem::size_of::<CommonPbwtSelectionV1>()
+        || parameters.chunk_count == 0
+        || parameters.ibd2_registry.is_null()
+    {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    for pointer_status in [
+        require_const_pointer(parameters.chunk_starts, parameters.chunk_count),
+        require_const_pointer(parameters.haplotypes, parameters.haplotypes_length),
+        require_const_pointer(
+            parameters.evaluated_sites,
+            parameters.evaluated_sites_length,
+        ),
+        require_const_pointer(parameters.site_groups, parameters.site_groups_length),
+        require_const_pointer(parameters.site_chunks, parameters.site_chunks_length),
+        require_const_pointer(parameters.selected_sites, parameters.selected_sites_length),
+        require_const_pointer(parameters.neighbors, parameters.neighbors_length),
+    ] {
+        if let Err(status) = pointer_status {
+            return status;
+        }
+    }
+    let chunk_starts = const_slice(parameters.chunk_starts, parameters.chunk_count);
+    if chunk_starts.iter().any(|&start| start < 0) {
+        return STATUS_OUT_OF_BOUNDS;
+    }
+    let status = shapeit_pbwt_select_sites_v1(
+        parameters.evaluated_sites,
+        parameters.evaluated_sites_length,
+        parameters.site_groups,
+        parameters.site_groups_length,
+        parameters.group_count,
+        parameters.seed,
+        parameters.domain,
+        parameters.iteration,
+        parameters.selected_sites,
+        parameters.selected_sites_length,
+    );
+    if status != STATUS_OK {
+        return status;
+    }
+    slice::from_raw_parts_mut(parameters.neighbors, parameters.neighbors_length).fill(-1);
+
+    let shared = CommonPbwtShared {
+        parameters,
+        chunk_starts,
+        next_chunk: AtomicUsize::new(0),
+        completed_chunks: AtomicUsize::new(0),
+        status: AtomicU32::new(STATUS_OK),
+        failed_chunk: AtomicUsize::new(usize::MAX),
+        serialized_progress: Mutex::new(()),
+    };
+    let execution_threads = core::cmp::min(worker_count, parameters.chunk_count);
+    if execution_threads == 1 {
+        run_pbwt_worker(&shared);
+    } else {
+        thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(execution_threads);
+            for _ in 0..execution_threads {
+                let shared = &shared;
+                match thread::Builder::new().spawn_scoped(scope, move || {
+                    run_pbwt_worker(shared);
+                }) {
+                    Ok(handle) => handles.push(handle),
+                    Err(_) => record_pbwt_failure(shared, STATUS_THREAD_FAILURE, usize::MAX),
+                }
+            }
+            for handle in handles {
+                if handle.join().is_err() {
+                    record_pbwt_failure(&shared, STATUS_THREAD_FAILURE, usize::MAX);
+                }
+            }
+        });
+    }
+    let status = shared.status.load(Ordering::SeqCst);
+    *failed_chunk = shared.failed_chunk.load(Ordering::SeqCst);
+    if status != STATUS_OK {
+        return status;
+    }
+    shapeit_pbwt_transpose_neighbors_v1(
+        parameters.neighbors,
+        parameters.neighbors_length,
+        parameters.target_individual_count * 2,
+        parameters.group_count,
+        parameters.depth,
+    )
+}
+
+#[no_mangle]
+/// Execute the complete mutable core of one common-phasing iteration.
+///
+/// The transaction selects PBWT neighbours, phases every sample, collapses
+/// IBD2 tracks, refreshes sampled target haplotypes, and transposes them for the
+/// next PBWT pass. Caller-owned bitmatrices are updated in place.
+///
+/// # Safety
+///
+/// `workers`, `parameters`, and `result` must be valid and exclusively used for
+/// the duration of this call. All nested buffers must satisfy their individual
+/// PBWT, common-iteration, and bitmatrix ABI contracts and must not overlap
+/// except where the same read-only buffer is intentionally repeated.
+pub unsafe extern "C" fn shapeit_common_workers_run_full_iteration_v1(
+    workers: *mut CommonWorkersV1,
+    parameters: *const CommonFullIterationV1,
+    result: *mut CommonFullIterationResultV1,
+) -> u32 {
+    if workers.is_null() || parameters.is_null() || result.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let parameters = &*parameters;
+    let worker_count = (*workers).workers.len();
+    let graph_count = (*workers).graph_addresses.len();
+    let variant_count = (*workers).variant_count;
+    let mut local_result = CommonFullIterationResultV1 {
+        failed_pbwt_chunk: usize::MAX,
+        ..CommonFullIterationResultV1::default()
+    };
+    if parameters.abi_version != ABI_VERSION
+        || parameters.struct_size < mem::size_of::<CommonFullIterationV1>()
+        || parameters.pbwt.site_count != variant_count
+        || parameters.pbwt.target_individual_count != graph_count
+        || parameters.pbwt.ibd2_registry.cast_mut() != parameters.phase.ibd2_registry
+        || parameters.pbwt.haplotypes != parameters.variant_major
+        || parameters.pbwt.haplotypes_length != parameters.variant_major_length
+        || parameters.pbwt.haplotype_stride != parameters.variant_major_stride
+        || parameters.phase.sample_template.conditioning.selected_sites
+            != parameters.pbwt.selected_sites
+        || parameters.phase.sample_template.conditioning.pbwt_neighbors != parameters.pbwt.neighbors
+        || parameters.phase.sample_template.conditioning.haplotypes != parameters.haplotype_major
+        || parameters.phase.sample_template.phase.haplotypes != parameters.haplotype_major
+    {
+        *result = local_result;
+        return STATUS_INVALID_DIMENSIONS;
+    }
+
+    let started = Instant::now();
+    let status = run_common_pbwt_selection(
+        worker_count,
+        &parameters.pbwt,
+        &mut local_result.failed_pbwt_chunk,
+    );
+    local_result.pbwt_seconds = started.elapsed().as_secs_f64();
+    if status != STATUS_OK {
+        *result = local_result;
+        return status;
+    }
+
+    let started = Instant::now();
+    let status = shapeit_common_workers_run_iteration_v1(
+        workers,
+        &parameters.phase,
+        &mut local_result.phase,
+    );
+    local_result.hmm_seconds = started.elapsed().as_secs_f64();
+    if status != STATUS_OK || local_result.phase.fatal_outcome != 0 {
+        *result = local_result;
+        return status;
+    }
+
+    let started = Instant::now();
+    local_result.ibd2 = (*parameters.phase.ibd2_registry).collapse();
+    local_result.ibd2_seconds = started.elapsed().as_secs_f64();
+
+    let started = Instant::now();
+    let workers_ref = &*workers;
+    let mut variant_views = Vec::with_capacity(workers_ref.graph_addresses.len());
+    let mut variants_length = None;
+    for &address in &workers_ref.graph_addresses {
+        let graph = &*(address as *const GenotypeGraphV1);
+        let variants = graph.hmm_arrays().0;
+        if variants_length.is_some_and(|expected| expected != variants.len()) {
+            *result = local_result;
+            return STATUS_INVALID_DIMENSIONS;
+        }
+        variants_length = Some(variants.len());
+        variant_views.push(variants.as_ptr());
+    }
+    let status = shapeit_bitmatrix_refresh_haplotypes_v1(
+        variant_views.as_ptr(),
+        variant_views.len(),
+        variants_length.unwrap_or(0),
+        variant_count,
+        0,
+        parameters.haplotype_major,
+        parameters.haplotype_major_length,
+        parameters.haplotype_major_rows,
+        parameters.haplotype_major_stride,
+    );
+    local_result.haplotype_refresh_seconds = started.elapsed().as_secs_f64();
+    if status != STATUS_OK {
+        *result = local_result;
+        return status;
+    }
+
+    let started = Instant::now();
+    let target_haplotype_count = match graph_count.checked_mul(2) {
+        Some(value) => value,
+        None => {
+            *result = local_result;
+            return STATUS_INTEGER_OVERFLOW;
+        }
+    };
+    let max_rows = match target_haplotype_count.checked_add(7) {
+        Some(value) => value & !7,
+        None => {
+            *result = local_result;
+            return STATUS_INTEGER_OVERFLOW;
+        }
+    };
+    let max_cols = match variant_count.checked_add(7) {
+        Some(value) => value & !7,
+        None => {
+            *result = local_result;
+            return STATUS_INTEGER_OVERFLOW;
+        }
+    };
+    let status = shapeit_bitmatrix_transpose_v1(
+        parameters.haplotype_major,
+        parameters.haplotype_major_length,
+        parameters.haplotype_major_rows,
+        parameters.haplotype_major_stride,
+        max_rows,
+        max_cols,
+        parameters.variant_major,
+        parameters.variant_major_length,
+        parameters.variant_major_stride,
+    );
+    local_result.transpose_seconds = started.elapsed().as_secs_f64();
+    *result = local_result;
+    status
 }
 
 #[no_mangle]

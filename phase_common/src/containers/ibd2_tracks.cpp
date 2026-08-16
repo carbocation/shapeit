@@ -53,17 +53,3 @@ void ibd2_tracks::initialize(int n_ind, variant_map & V) {
 			to_string(status) + ")");
 	}
 }
-
-void ibd2_tracks::collapse() {
-	tac.clock();
-	shapeit_ibd2_stats_v1 stats = {};
-	const uint32_t status = shapeit_ibd2_tracks_collapse_v1(Handle, &stats);
-	if (status != SHAPEIT_IBD2_STATUS_OK) {
-		throw runtime_error("Rust IBD2 registry failed to collapse tracks (status " +
-			to_string(status) + ")");
-	}
-	vrb.bullet("IBD2 tracks [#inds=" + stb.str(stats.individuals) +
-		" / #tracks=" + stb.str(stats.tracks) + " / #merged = " +
-		stb.str(stats.merged) + "]");
-}
-

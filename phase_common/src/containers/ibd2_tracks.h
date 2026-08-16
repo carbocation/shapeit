@@ -38,7 +38,6 @@ public:
 	ibd2_tracks & operator=(const ibd2_tracks &) = delete;
 	void clear();
 	void initialize(int, variant_map &);
-	void collapse();
 };
 
 #endif

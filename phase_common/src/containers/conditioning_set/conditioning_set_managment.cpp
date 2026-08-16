@@ -84,6 +84,7 @@ void conditioning_set::initialize(variant_map & V, float _modulo_selection, floa
 	//MAPPING EVAL+GRP
 	int n_evaluated = 0;
 	sites_pbwt_evaluation = vector < uint8_t > (V.size(), 0);
+	sites_pbwt_selection = vector < uint8_t > (V.size(), 0);
 	sites_pbwt_mthreading = vector < int > (V.size(), -1);
 	sites_pbwt_grouping = vector < int > (V.size(), -1);
 	for (int l = 0 ; l < V.size() ; l ++) {

@@ -25,22 +25,67 @@
 
 using namespace std;
 
-extern "C" void shapeit_common_progress_callback(
+extern "C" void shapeit_common_hmm_progress_callback(
 	size_t completed, size_t total, void *) {
 	if (total > 0) vrb.progress("  * HMM computations", completed * 1.0 / total);
 }
 
-void phaser::phaseWindow() {
-	tac.clock();
-	vrb.progress("  * HMM computations", 0.0);
+extern "C" void shapeit_common_pbwt_progress_callback(
+	size_t completed, size_t total, void *) {
+	if (total > 0) vrb.progress("  * PBWT selection", completed * 1.0 / total);
+}
 
-	shapeit_common_iteration_v1 parameters = {};
+void phaser::phaseWindow() {
+	vrb.progress("  * PBWT selection", 0.0);
+
+	shapeit_common_full_iteration_v1 full = {};
+	full.abi_version = SHAPEIT_COMMON_ABI_VERSION;
+	full.struct_size = sizeof(full);
+	full.haplotype_major = H.H_opt_hap.bytes;
+	full.haplotype_major_length = H.H_opt_hap.n_bytes;
+	full.haplotype_major_rows = H.H_opt_hap.n_rows;
+	full.haplotype_major_stride = H.H_opt_hap.n_cols >> 3;
+	full.variant_major = H.H_opt_var.bytes;
+	full.variant_major_length = H.H_opt_var.n_bytes;
+	full.variant_major_rows = H.H_opt_var.n_rows;
+	full.variant_major_stride = H.H_opt_var.n_cols >> 3;
+
+	shapeit_common_pbwt_selection_v1 & pbwt = full.pbwt;
+	pbwt.abi_version = SHAPEIT_COMMON_ABI_VERSION;
+	pbwt.struct_size = sizeof(pbwt);
+	pbwt.haplotypes = H.H_opt_var.bytes;
+	pbwt.haplotypes_length = H.H_opt_var.n_bytes;
+	pbwt.haplotype_stride = H.H_opt_var.n_cols >> 3;
+	pbwt.site_count = H.n_site;
+	pbwt.haplotype_count = H.n_hap;
+	pbwt.target_individual_count = H.n_ind;
+	pbwt.evaluated_sites = H.sites_pbwt_evaluation.data();
+	pbwt.evaluated_sites_length = H.sites_pbwt_evaluation.size();
+	pbwt.selected_sites = H.sites_pbwt_selection.data();
+	pbwt.selected_sites_length = H.sites_pbwt_selection.size();
+	pbwt.site_groups = reinterpret_cast<const int32_t *>(H.sites_pbwt_grouping.data());
+	pbwt.site_groups_length = H.sites_pbwt_grouping.size();
+	pbwt.group_count = H.sites_pbwt_ngroups;
+	pbwt.site_chunks = reinterpret_cast<const int32_t *>(H.sites_pbwt_mthreading.data());
+	pbwt.site_chunks_length = H.sites_pbwt_mthreading.size();
+	pbwt.chunk_starts = reinterpret_cast<const int32_t *>(H.starts_pbwt_mthreading.data());
+	pbwt.chunk_count = H.starts_pbwt_mthreading.size();
+	pbwt.depth = H.depth;
+	pbwt.ibd2_registry = H.Kbanned.Handle;
+	pbwt.neighbors = reinterpret_cast<int32_t *>(H.indexes_pbwt_neighbour.data());
+	pbwt.neighbors_length = H.indexes_pbwt_neighbour.size();
+	pbwt.seed = rng.getSeed();
+	pbwt.domain = RNG_DOMAIN_PHASE_COMMON_PBWT_SITE;
+	pbwt.iteration = iteration_index;
+	pbwt.progress = shapeit_common_pbwt_progress_callback;
+
+	shapeit_common_iteration_v1 & parameters = full.phase;
 	parameters.abi_version = SHAPEIT_COMMON_ABI_VERSION;
 	parameters.struct_size = sizeof(parameters);
 	parameters.base_pair_positions = M.bp.data();
 	parameters.base_pair_positions_length = M.bp.size();
 	parameters.ibd2_registry = H.Kbanned.Handle;
-	parameters.progress = shapeit_common_progress_callback;
+	parameters.progress = shapeit_common_hmm_progress_callback;
 
 	shapeit_common_phase_job_v1 & sample = parameters.sample_template;
 	sample.abi_version = SHAPEIT_COMMON_ABI_VERSION;
@@ -94,26 +139,32 @@ void phaser::phaseWindow() {
 	phase.sample_domain = RNG_DOMAIN_PHASE_COMMON_MCMC;
 	phase.sample_iteration = iteration_index;
 
-	shapeit_common_iteration_result_v1 result = {};
-	const uint32_t status = shapeit_common_workers_run_iteration_v1(
-		phase_workers, &parameters, &result);
-	const string failed_sample = result.failed_sample < static_cast<size_t>(G.n_ind)
-		? G.vecG[result.failed_sample]->name
+	shapeit_common_full_iteration_result_v1 result = {};
+	const uint32_t status = shapeit_common_workers_run_full_iteration_v1(
+		phase_workers, &full, &result);
+	const shapeit_common_iteration_result_v1 & phase_result = result.phase;
+	const string failed_sample = phase_result.failed_sample < static_cast<size_t>(G.n_ind)
+		? G.vecG[phase_result.failed_sample]->name
 		: "unknown sample";
 	if (status == SHAPEIT_COMMON_STATUS_INSUFFICIENT_STATES) {
-		vrb.error("Fewer than two conditioning haplotypes are available for [" +
-			failed_sample + "]");
+		if (phase_result.failed_sample < static_cast<size_t>(G.n_ind)) {
+			vrb.error("Fewer than two conditioning haplotypes are available for [" +
+				failed_sample + "]");
+		} else {
+			vrb.error("Insufficient non-IBD2 PBWT neighbours for the requested depth");
+		}
 	}
 	if (status != SHAPEIT_COMMON_STATUS_OK) {
-		throw runtime_error("Rust common iteration failed for [" + failed_sample +
-			"] (status " + to_string(status) + ")");
+		throw runtime_error("Rust full common iteration failed (status " +
+			to_string(status) + ")");
 	}
-	if (result.fatal_outcome == -2) {
+	if (phase_result.fatal_outcome == -2) {
 		vrb.error("Diploid underflow impossible to recover for [" + failed_sample + "]");
 	}
-	if (result.fatal_outcome == -1) {
+	if (phase_result.fatal_outcome == -1) {
 		vrb.error("Haploid underflow impossible to recover for [" + failed_sample + "]");
 	}
+	vrb.bullet("PBWT selection (" + stb.str(result.pbwt_seconds, 2) + "s)");
 
 	const size_t fallback_count = shapeit_common_workers_fallback_count_v1(phase_workers);
 	for (size_t index = 0 ; index < fallback_count ; index ++) {
@@ -130,12 +181,17 @@ void phaser::phaseWindow() {
 			" random states");
 	}
 
-	vrb.bullet("HMM computations [K=" + stb.str(result.conditioning_states_mean, 1) +
-		"+/-" + stb.str(result.conditioning_states_sd, 1) + " / W=" +
-		stb.str(result.window_megabases_mean, 2) + "Mb / US=" +
-		stb.str(result.underflow_recovered_summing) + " / UP=" +
-		stb.str(result.underflow_recovered_precision) + "] (" +
-		stb.str(tac.rel_time()*1.0/1000, 2) + "s)");
+	vrb.bullet("HMM computations [K=" + stb.str(phase_result.conditioning_states_mean, 1) +
+		"+/-" + stb.str(phase_result.conditioning_states_sd, 1) + " / W=" +
+		stb.str(phase_result.window_megabases_mean, 2) + "Mb / US=" +
+		stb.str(phase_result.underflow_recovered_summing) + " / UP=" +
+		stb.str(phase_result.underflow_recovered_precision) + "] (" +
+		stb.str(result.hmm_seconds, 2) + "s)");
+	vrb.bullet("IBD2 tracks [#inds=" + stb.str(result.ibd2.individuals) +
+		" / #tracks=" + stb.str(result.ibd2.tracks) + " / #merged = " +
+		stb.str(result.ibd2.merged) + "]");
+	vrb.bullet("HAP update (" + stb.str(result.haplotype_refresh_seconds, 2) + "s)");
+	vrb.bullet("H2V transpose (" + stb.str(result.transpose_seconds, 2) + "s)");
 }
 
 void phaser::phase() {
@@ -149,17 +205,8 @@ void phaser::phase() {
 			case STAGE_PRUN:	vrb.title("Pruning iteration [" + stb.str(iter+1) + "/" + stb.str(iteration_counts[iteration_stage]) + "]"); break;
 			case STAGE_MAIN:	vrb.title("Main iteration [" + stb.str(iter+1) + "/" + stb.str(iteration_counts[iteration_stage]) + "]"); break;
 			}
-			//SELECT NEW STATES WITH PBWT
-			H.select(iteration_index);
-			//PHASE DATA
+			//SELECT STATES, PHASE, COLLAPSE IBD2, AND REFRESH HAPLOTYPES IN RUST
 			phaseWindow();
-			//MERGE IBD2 PAIRS
-			H.Kbanned.collapse();
-			//UPDATE H with new sampled haplotypes
-			H.updateHaplotypes(G);
-			//if (options.count("pedigree")) H.checkScaffoldPedigrees(G, options["pedigree"].as < string > ());
-			//TRANSPOSE H from Hfirst to Vfirst (for next PBWT compute)
-			H.transposeHaplotypes_H2V(false);
 			//UPDATE PS after prunning
 			if (iteration_types[iteration_stage] == STAGE_PRUN) {
 				n_new_segments = G.numberOfSegments();

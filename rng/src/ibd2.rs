@@ -17,9 +17,9 @@ pub struct Ibd2TrackV1 {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Ibd2StatsV1 {
-    individuals: usize,
-    tracks: usize,
-    merged: usize,
+    pub(crate) individuals: usize,
+    pub(crate) tracks: usize,
+    pub(crate) merged: usize,
 }
 
 pub struct Ibd2TracksV1 {
@@ -129,7 +129,7 @@ impl Ibd2TracksV1 {
         Ok(())
     }
 
-    fn collapse(&mut self) -> Ibd2StatsV1 {
+    pub(crate) fn collapse(&mut self) -> Ibd2StatsV1 {
         let mut stats = Ibd2StatsV1::default();
         for tracks in &mut self.tracks {
             tracks.sort_unstable_by_key(|track| (track.individual, track.from));

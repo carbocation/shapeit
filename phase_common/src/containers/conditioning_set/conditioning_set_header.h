@@ -67,10 +67,6 @@ public:
 	bool split(variant_map & V, float min_length, int left_index, int right_index, std::vector < int > & output);
 
 	//STATES PROCESSING
-	void select(int chunk);
-	void select(uint32_t);
-	void transposePBWTneighbours();
-
 	//PBWT PHASING SWEEP
 	void solve(int chunk, genotype_set *);
 	void solve(genotype_set *);

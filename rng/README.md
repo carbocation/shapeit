@@ -123,8 +123,15 @@ HMM workspaces. `shapeit_common_workers_run_iteration_v1` dynamically schedules
 all target samples on scoped Rust threads, derives each logical RNG stream from
 the sample index, aggregates window statistics and fallback diagnostics, and
 serializes direct IBD2-registry updates and progress callbacks. C++ now retains
-iteration-stage orchestration, PBWT refresh, reporting, and I/O, but no longer
-owns common-phase sample threads or per-worker compute objects.
+iteration-stage orchestration, reporting, and I/O, but no longer owns
+common-phase sample threads or per-worker compute objects.
+
+`shapeit_common_workers_run_full_iteration_v1` is the mutable production core.
+It performs PBWT site and neighbour selection, the complete sample phase pass,
+IBD2 collapse, target-haplotype refresh, and the H-to-V transpose as one Rust
+transaction over caller-owned matrices. Rust schedules both the PBWT chunks and
+sample jobs. C++ chooses the iteration stage and presents timings and errors,
+but does not mutate phasing state between those operations.
 
 ## IBD2 registry
 
@@ -144,9 +151,9 @@ locus rows, so logical results do not depend on worker assignment.
 `shapeit_pbwt_select_sites_v1` first chooses one evaluated locus per PBWT group
 from stable group-specific Philox streams. `shapeit_pbwt_select_chunk_v1` then
 owns the iterative common-phasing PBWT ordering/divergence scan and IBD2-aware
-neighbour search. C++ flattens its collapsed IBD2 tracks once per sweep and
-schedules disjoint chunks; Rust transposes the completed neighbour slabs
-directly into the haplotype-major layout borrowed by the conditioning jobs.
+neighbour search. The full common-iteration ABI schedules disjoint chunks in
+Rust and transposes their completed neighbour slabs directly into the
+haplotype-major layout borrowed by the conditioning jobs.
 
 ## Random-number generation
 
