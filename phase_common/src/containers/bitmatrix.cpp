@@ -78,29 +78,6 @@ int bitmatrix::subset(bitmatrix & BM, const vector < unsigned int > & rows, unsi
 	return col_from % 8;
 }
 
-int bitmatrix::subsetTranspose(const bitmatrix & BM, const vector < unsigned int > & rows, unsigned int col_from, unsigned int col_to) {
-	const uint32_t source_byte_first = col_from >> 3;
-	const uint32_t source_byte_count = (col_to >> 3) - source_byte_first + 1;
-	n_rows = source_byte_count << 3;
-	n_cols = ROUND8(rows.size());
-	n_bytes = (n_cols >> 3) * static_cast<unsigned long>(n_rows);
-	bytes = static_cast<unsigned char *>(malloc(n_bytes));
-
-	const uint64_t source_stride = BM.n_cols >> 3;
-	const uint64_t target_stride = n_cols >> 3;
-	const uint32_t status = shapeit_bitmatrix_subset_transpose_v1(
-		BM.bytes, BM.n_bytes, source_stride, rows.data(), rows.size(),
-		source_byte_first, source_byte_count, bytes, n_bytes, target_stride);
-	if (status != SHAPEIT_BITMATRIX_STATUS_OK) {
-		free(bytes);
-		bytes = NULL;
-		n_rows = n_cols = n_bytes = 0;
-		throw runtime_error("Rust subset-transpose rejected the bitmatrix layout (status " +
-			to_string(status) + ")");
-	}
-	return col_from & 7;
-}
-
 /*
 void bitmatrix::getMatchHetCount(unsigned int i0, unsigned int i1, unsigned int start, unsigned int stop, int & c1, int & m1) {
 	c1=m1=0;

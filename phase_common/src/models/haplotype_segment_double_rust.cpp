@@ -22,13 +22,53 @@
 
 #include <models/haplotype_segment_double_rust.h>
 
+#include <shapeit_bitmatrix.h>
 #include <shapeit_hmm.h>
 #include <algorithm>
 #include <boost/align/aligned_allocator.hpp>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 
 using namespace std;
+
+namespace {
+
+struct subset_transpose_view {
+	const unsigned char * bytes;
+	size_t length;
+	size_t stride;
+	int locus_offset;
+};
+
+subset_transpose_view prepare_haplotype_subset(
+	const bitmatrix & source, const vector < unsigned int > & rows,
+	unsigned int locus_first, unsigned int locus_last) {
+	static_assert(sizeof(unsigned int) == sizeof(uint32_t));
+	const uint32_t source_byte_first = locus_first >> 3;
+	const uint32_t source_byte_count = (locus_last >> 3) - source_byte_first + 1;
+	if (rows.size() > numeric_limits<size_t>::max() - 7) {
+		throw runtime_error("Rust HMM subset row count overflow");
+	}
+	const size_t target_stride = ((rows.size() + 7) & ~size_t(7)) >> 3;
+	const size_t target_rows = size_t(source_byte_count) << 3;
+	if (target_stride != 0 && target_rows > numeric_limits<size_t>::max() / target_stride) {
+		throw runtime_error("Rust HMM subset workspace size overflow");
+	}
+	const size_t target_length = target_rows * target_stride;
+	static thread_local vector < unsigned char > subset;
+	subset.resize(target_length);
+	const uint32_t status = shapeit_bitmatrix_subset_transpose_v1(
+		source.bytes, source.n_bytes, source.n_cols >> 3, rows.data(), rows.size(),
+		source_byte_first, source_byte_count, subset.data(), subset.size(), target_stride);
+	if (status != SHAPEIT_BITMATRIX_STATUS_OK) {
+		throw runtime_error("Rust HMM subset transpose rejected the bitmatrix layout (status " +
+			to_string(status) + ")");
+	}
+	return { subset.data(), subset.size(), target_stride, int(locus_first & 7) };
+}
+
+}
 
 int run_haplotype_segment_double_rust(
 	genotype * G, bitmatrix & H, vector < unsigned int > & conditioning_haplotypes,
@@ -36,8 +76,7 @@ int run_haplotype_segment_double_rust(
 	vector < float > & missing_probabilities) {
 	static_assert(sizeof(unsigned long) == sizeof(uint64_t));
 
-	bitmatrix Hvar;
-	const int locus_offset = Hvar.subsetTranspose(
+	const subset_transpose_view Hvar = prepare_haplotype_subset(
 		H, conditioning_haplotypes, W.start_locus, W.stop_locus);
 	const size_t segment_count = W.stop_segment - W.start_segment + 1;
 	const size_t missing_count = std::max(0, W.stop_missing - W.start_missing + 1);
@@ -63,10 +102,10 @@ int run_haplotype_segment_double_rust(
 	parameters.diplotypes = reinterpret_cast<const uint64_t *>(G->Diplotypes.data());
 	parameters.diplotypes_length = G->Diplotypes.size();
 	parameters.haplotypes = Hvar.bytes;
-	parameters.haplotypes_length = Hvar.n_bytes;
-	parameters.haplotype_stride = Hvar.n_cols >> 3;
+	parameters.haplotypes_length = Hvar.length;
+	parameters.haplotype_stride = Hvar.stride;
 	parameters.conditioning_haplotypes = conditioning_haplotypes.size();
-	parameters.locus_offset = locus_offset;
+	parameters.locus_offset = Hvar.locus_offset;
 	parameters.centimorgans = M.cm.data();
 	parameters.centimorgans_length = M.cm.size();
 	parameters.recombination = M.t.data();
@@ -111,8 +150,7 @@ int run_haplotype_segment_single_rust(
 	vector < float > & missing_probabilities) {
 	static_assert(sizeof(unsigned long) == sizeof(uint64_t));
 
-	bitmatrix Hvar;
-	const int locus_offset = Hvar.subsetTranspose(
+	const subset_transpose_view Hvar = prepare_haplotype_subset(
 		H, conditioning_haplotypes, W.start_locus, W.stop_locus);
 	shapeit_hmm_segment_single_v1 parameters = {};
 	parameters.abi_version = SHAPEIT_HMM_ABI_VERSION;
@@ -126,10 +164,10 @@ int run_haplotype_segment_single_rust(
 	parameters.diplotypes = reinterpret_cast<const uint64_t *>(G->Diplotypes.data());
 	parameters.diplotypes_length = G->Diplotypes.size();
 	parameters.haplotypes = Hvar.bytes;
-	parameters.haplotypes_length = Hvar.n_bytes;
-	parameters.haplotype_stride = Hvar.n_cols >> 3;
+	parameters.haplotypes_length = Hvar.length;
+	parameters.haplotype_stride = Hvar.stride;
 	parameters.conditioning_haplotypes = conditioning_haplotypes.size();
-	parameters.locus_offset = locus_offset;
+	parameters.locus_offset = Hvar.locus_offset;
 	parameters.centimorgans = M.cm.data();
 	parameters.centimorgans_length = M.cm.size();
 	parameters.recombination = M.t.data();

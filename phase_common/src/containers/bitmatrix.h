@@ -34,7 +34,6 @@ public:
 	~bitmatrix();
 
 	int subset(bitmatrix & BM, const std::vector < unsigned int > & rows, unsigned int col_from, unsigned int col_to);
-	int subsetTranspose(const bitmatrix & BM, const std::vector < unsigned int > & rows, unsigned int col_from, unsigned int col_to);
 	//void getMatchHetCount(unsigned int i0, unsigned int i1, unsigned int start, unsigned int stop, int & c1, int & m1);
 	//void getMatchHetCount_seq(unsigned int i0, unsigned int i1, unsigned int start, unsigned int stop, int & c1, int & m1);
 	float getMatchHets(unsigned int i0, unsigned int i1, unsigned int start, unsigned int stop);
