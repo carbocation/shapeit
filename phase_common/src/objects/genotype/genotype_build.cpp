@@ -40,9 +40,8 @@ uint32_t genotype::setHetsAsMissing() {
 }
 
 void genotype::build() {
-	if (Graph != nullptr) throw runtime_error("Genotype graph has already been built");
-	uint32_t status = shapeit_genotype_graph_create_v1(
-		Variants.data(), Variants.size(), n_variants, &Graph);
+	if (Graph == nullptr) throw runtime_error("Genotype variants have not been allocated");
+	uint32_t status = shapeit_genotype_graph_build_in_place_v1(Graph);
 	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
 		throw runtime_error("Rust genotype graph construction rejected the packed variants (status " +
 			to_string(status) + ")");
@@ -52,5 +51,4 @@ void genotype::build() {
 	n_ambiguous = view.ambiguous_length;
 	n_missing = view.missing_count;
 	n_transitions = view.transition_count;
-	vector < unsigned char > ().swap(Variants);
 }

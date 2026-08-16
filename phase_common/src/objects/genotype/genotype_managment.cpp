@@ -35,6 +35,7 @@ genotype::genotype(unsigned int _index) {
 	n_transitions = 0;
 	n_stored_transitionProbs = 0;
 	n_storage_events = 0;
+	Variants = {};
 	Graph = nullptr;
 	this->name = "";
 	double_precision = false;
@@ -46,12 +47,32 @@ genotype::~genotype() {
 }
 
 void genotype::free() {
+	Variants = {};
 	if (Graph != nullptr) {
 		shapeit_genotype_graph_free_v1(Graph);
 		Graph = nullptr;
 	}
 	name = "";
-	vector < unsigned char > ().swap(Variants);
+}
+
+void genotype::allocateVariants(unsigned int variant_count) {
+	if (Graph != nullptr) throw runtime_error("Genotype variants have already been allocated");
+	n_variants = variant_count;
+	uint32_t status = shapeit_genotype_graph_allocate_v1(n_variants, &Graph);
+	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
+		throw runtime_error("Rust genotype variant allocation failed (status " +
+			to_string(status) + ")");
+	}
+	uint8_t * variants = nullptr;
+	size_t variants_length = 0;
+	status = shapeit_genotype_graph_variants_mut_v1(Graph, &variants, &variants_length);
+	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
+		shapeit_genotype_graph_free_v1(Graph);
+		Graph = nullptr;
+		throw runtime_error("Rust genotype variant borrow failed (status " +
+			to_string(status) + ")");
+	}
+	Variants = span < unsigned char > (variants, variants_length);
 }
 
 shapeit_genotype_graph_view_v1 genotype::graphView() const {
@@ -66,7 +87,5 @@ shapeit_genotype_graph_view_v1 genotype::graphView() const {
 }
 
 span < const unsigned char > genotype::packedVariants() const {
-	if (Graph == nullptr) return span < const unsigned char > (Variants.data(), Variants.size());
-	const shapeit_genotype_graph_view_v1 view = graphView();
-	return span < const unsigned char > (view.variants, view.variants_length);
+	return span < const unsigned char > (Variants.data(), Variants.size());
 }

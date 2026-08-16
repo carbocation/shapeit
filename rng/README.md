@@ -51,8 +51,9 @@ scaffold ordering, 8-lane ambiguity codes, diplotype masks, missing counts, and
 transition counts while reducing repeated scans of the packed variants. The
 buffer-oriented ABI remains available, while `phase_common` uses an opaque
 Rust-owned graph that retains packed variants and every derived graph vector;
-C++ consumers receive short-lived read-only views rather than parallel mutable
-containers.
+the packed allocation is created before HTSlib parsing and exposed as one
+stable mutable span for input initialization. C++ consumers otherwise receive
+short-lived read-only views rather than parallel mutable containers.
 
 `shapeit_genotype_sample_v1` samples a complete graph in one call, including
 forward/backward transition sampling, missing-genotype imputation, and applying

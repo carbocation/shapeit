@@ -40,8 +40,7 @@ void genotype_set::allocate(unsigned long n_main_samples, unsigned long n_varian
 	vecG = vector < genotype * > (n_main_samples);
 	for (unsigned int i = 0 ; i < n_main_samples ; i ++) {
 		vecG[i] = new genotype (i);
-		vecG[i]->n_variants = n_variants;
-		vecG[i]->Variants = vector < unsigned char > (DIV2(n_variants) + MOD2(n_variants), 0);
+		vecG[i]->allocateVariants(n_variants);
 	}
 	n_ind = n_main_samples;
 	n_site = n_variants;
@@ -169,5 +168,4 @@ void genotype_set::resetHaploidHeterozgotes(vector < string > & haploids) {
 	vrb.bullet2("#haploids = " + stb.str(nhaploids) + " / #diploids = " + stb.str(n_ind - nhaploids));
 	vrb.bullet2("Hets set as missing: n=" + stb.str(nreset) + " (" + stb.str(nreset * 100.0 / ntotal, 3) + "%)");
 }
-
 

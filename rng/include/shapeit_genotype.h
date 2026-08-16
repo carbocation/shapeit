@@ -89,6 +89,18 @@ uint32_t shapeit_genotype_graph_create_v1(
     size_t variant_count,
     shapeit_genotype_graph_v1 ** graph);
 
+uint32_t shapeit_genotype_graph_allocate_v1(
+    size_t variant_count,
+    shapeit_genotype_graph_v1 ** graph);
+
+uint32_t shapeit_genotype_graph_variants_mut_v1(
+    shapeit_genotype_graph_v1 * graph,
+    uint8_t ** variants,
+    size_t * variants_length);
+
+uint32_t shapeit_genotype_graph_build_in_place_v1(
+    shapeit_genotype_graph_v1 * graph);
+
 uint32_t shapeit_genotype_graph_borrow_v1(
     const shapeit_genotype_graph_v1 * graph,
     shapeit_genotype_graph_view_v1 * view);

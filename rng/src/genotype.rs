@@ -154,6 +154,7 @@ pub struct GenotypeGraphV1 {
     missing_count: usize,
     transition_count: u32,
     storage: Option<GenotypeStorageV1>,
+    built: bool,
 }
 
 impl GenotypeGraphV1 {
@@ -873,7 +874,46 @@ impl GenotypeGraphV1 {
             missing_count: sizes.missing,
             transition_count,
             storage: None,
+            built: true,
         }
+    }
+
+    fn allocate(variant_count: usize, variants_length: usize) -> Self {
+        Self {
+            variant_count,
+            variants: vec![0u8; variants_length],
+            ambiguous: Vec::new(),
+            diplotypes: Vec::new(),
+            segment_lengths: Vec::new(),
+            missing_count: 0,
+            transition_count: 0,
+            storage: None,
+            built: false,
+        }
+    }
+
+    fn build_in_place(&mut self) -> Result<(), u32> {
+        if self.built {
+            return Err(STATUS_INVALID_DIMENSIONS);
+        }
+        let sizes = graph_sizes(&self.variants, self.variant_count);
+        let mut segment_lengths = vec![0u16; sizes.segments];
+        let mut ambiguous = vec![0u8; sizes.ambiguous];
+        let mut diplotypes = vec![0u64; sizes.segments];
+        let transition_count = build_graph(
+            &self.variants,
+            self.variant_count,
+            &mut segment_lengths,
+            &mut ambiguous,
+            &mut diplotypes,
+        );
+        self.ambiguous = ambiguous;
+        self.diplotypes = diplotypes;
+        self.segment_lengths = segment_lengths;
+        self.missing_count = sizes.missing;
+        self.transition_count = transition_count;
+        self.built = true;
+        Ok(())
     }
 }
 
@@ -1594,6 +1634,74 @@ pub unsafe extern "C" fn shapeit_genotype_graph_create_v1(
 }
 
 #[no_mangle]
+/// Allocate zeroed packed variants in a Rust-owned, not-yet-built graph.
+///
+/// # Safety
+///
+/// `graph` must be writable for one pointer. The returned graph must eventually
+/// be freed by `shapeit_genotype_graph_free_v1`.
+pub unsafe extern "C" fn shapeit_genotype_graph_allocate_v1(
+    variant_count: usize,
+    graph: *mut *mut GenotypeGraphV1,
+) -> u32 {
+    if graph.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    *graph = core::ptr::null_mut();
+    let variants_length = match required_variant_bytes(variant_count) {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
+    *graph = Box::into_raw(Box::new(GenotypeGraphV1::allocate(
+        variant_count,
+        variants_length,
+    )));
+    STATUS_OK
+}
+
+#[no_mangle]
+/// Borrow the stable mutable packed-variant allocation for a graph's lifetime.
+///
+/// The allocation is never resized. Callers must not access it concurrently
+/// with a mutable graph operation.
+///
+/// # Safety
+///
+/// `graph` must be live and both output pointers writable.
+pub unsafe extern "C" fn shapeit_genotype_graph_variants_mut_v1(
+    graph: *mut GenotypeGraphV1,
+    variants: *mut *mut u8,
+    variants_length: *mut usize,
+) -> u32 {
+    if graph.is_null() || variants.is_null() || variants_length.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let graph = &mut *graph;
+    *variants = graph.variants.as_mut_ptr();
+    *variants_length = graph.variants.len();
+    STATUS_OK
+}
+
+#[no_mangle]
+/// Finalize all derived graph arrays from previously populated packed variants.
+///
+/// # Safety
+///
+/// `graph` must be a live, exclusively borrowed graph returned by the allocate
+/// function and may be finalized only once.
+pub unsafe extern "C" fn shapeit_genotype_graph_build_in_place_v1(
+    graph: *mut GenotypeGraphV1,
+) -> u32 {
+    if graph.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    match (*graph).build_in_place() {
+        Ok(()) => STATUS_OK,
+        Err(status) => status,
+    }
+}
+
+#[no_mangle]
 /// Borrow graph buffers until the next mutable graph call.
 ///
 /// # Safety
@@ -1605,6 +1713,9 @@ pub unsafe extern "C" fn shapeit_genotype_graph_borrow_v1(
 ) -> u32 {
     if graph.is_null() || view.is_null() {
         return STATUS_NULL_POINTER;
+    }
+    if !(*graph).built {
+        return STATUS_INVALID_DIMENSIONS;
     }
     *view = (*graph).view();
     STATUS_OK
@@ -1965,6 +2076,9 @@ pub unsafe extern "C" fn shapeit_genotype_graph_prune_v1(
         return STATUS_NULL_POINTER;
     }
     let graph = &mut *graph;
+    if !graph.built {
+        return STATUS_INVALID_DIMENSIONS;
+    }
     if transition_probabilities_length != graph.transition_count as usize {
         return STATUS_INVALID_DIMENSIONS;
     }
@@ -2132,6 +2246,9 @@ pub unsafe extern "C" fn shapeit_genotype_graph_sample_v1(
         return STATUS_NULL_POINTER;
     }
     let graph = &mut *graph;
+    if !graph.built {
+        return STATUS_INVALID_DIMENSIONS;
+    }
     shapeit_genotype_sample_v1(
         graph.variants.as_mut_ptr(),
         graph.variants.len(),
@@ -2382,6 +2499,9 @@ pub unsafe extern "C" fn shapeit_genotype_graph_store_v1(
         return STATUS_NULL_POINTER;
     }
     let graph = &mut *graph;
+    if !graph.built {
+        return STATUS_INVALID_DIMENSIONS;
+    }
     let expected_missing = match graph.missing_count.checked_mul(8) {
         Some(value) => value,
         None => return STATUS_INTEGER_OVERFLOW,
@@ -2498,6 +2618,9 @@ pub unsafe extern "C" fn shapeit_genotype_graph_solve_storage_v1(
         return STATUS_NULL_POINTER;
     }
     let graph = &mut *graph;
+    if !graph.built {
+        return STATUS_INVALID_DIMENSIONS;
+    }
     shapeit_genotype_solve_storage_v1(
         graph.variants.as_mut_ptr(),
         graph.variants.len(),
@@ -2527,6 +2650,9 @@ pub unsafe extern "C" fn shapeit_genotype_graph_solve_v1(
         return STATUS_NULL_POINTER;
     }
     let graph = &mut *graph;
+    if !graph.built {
+        return STATUS_INVALID_DIMENSIONS;
+    }
     let storage = match graph.storage.as_ref() {
         Some(value) => value,
         None => return STATUS_INVALID_DIMENSIONS,
@@ -3003,6 +3129,37 @@ mod tests {
             );
             shapeit_genotype_graph_free_v1(graph);
         }
+    }
+
+    #[test]
+    fn owned_graph_allocates_variants_before_in_place_build() {
+        let expected_variants = pack(&[2, 2, 2, 2, 1, 0]);
+        let mut graph = core::ptr::null_mut();
+        let allocate_status = unsafe { shapeit_genotype_graph_allocate_v1(6, &mut graph) };
+        assert_eq!(allocate_status, STATUS_OK);
+        let mut variants = core::ptr::null_mut();
+        let mut variants_length = 0usize;
+        let variants_status = unsafe {
+            shapeit_genotype_graph_variants_mut_v1(graph, &mut variants, &mut variants_length)
+        };
+        assert_eq!(variants_status, STATUS_OK);
+        assert_eq!(variants_length, expected_variants.len());
+        unsafe {
+            slice::from_raw_parts_mut(variants, variants_length)
+                .copy_from_slice(&expected_variants);
+        }
+        let build_status = unsafe { shapeit_genotype_graph_build_in_place_v1(graph) };
+        assert_eq!(build_status, STATUS_OK);
+        assert_eq!(
+            unsafe { shapeit_genotype_graph_build_in_place_v1(graph) },
+            STATUS_INVALID_DIMENSIONS
+        );
+        let mut view = unsafe { (*graph).view() };
+        let borrow_status = unsafe { shapeit_genotype_graph_borrow_v1(graph, &mut view) };
+        assert_eq!(borrow_status, STATUS_OK);
+        assert_eq!(view.variant_count, 6);
+        assert_eq!(view.variants_length, expected_variants.len());
+        unsafe { shapeit_genotype_graph_free_v1(graph) };
     }
 
     #[test]

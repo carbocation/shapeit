@@ -59,13 +59,14 @@ public:
 	bool double_precision;					//If I get underflows using float, move to double
 	bool haploid;							//Is this sample haploid?
 
-	// Packed input exists in C++ only until build(); the live graph is Rust-owned.
-	std::vector < unsigned char > Variants;
+	// Stable borrowed span into the Rust-owned packed variant allocation.
+	std::span < unsigned char > Variants;
 	shapeit_genotype_graph_v1 * Graph;
 
 	//METHODS
 	genotype(unsigned int);
 	~genotype();
+	void allocateVariants(unsigned int);
 	void free();
 	void build();
 	void sample(std::vector < double > &, std::vector < float > &, random_number_generator &);
