@@ -58,6 +58,25 @@ uint32_t shapeit_genotype_sample_v1(
     uint32_t iteration,
     uint64_t item);
 
+uint32_t shapeit_genotype_solve_v1(
+    uint8_t * variants,
+    size_t variants_length,
+    size_t variant_count,
+    const uint8_t * ambiguous,
+    size_t ambiguous_length,
+    const uint64_t * diplotypes,
+    size_t diplotypes_length,
+    const uint16_t * segment_lengths,
+    size_t segment_lengths_length,
+    const uint32_t * stored_transition_indexes,
+    size_t stored_transition_indexes_length,
+    const float * stored_transition_probabilities,
+    size_t stored_transition_probabilities_length,
+    const float * missing_probabilities,
+    size_t missing_probabilities_length,
+    uint8_t haploid,
+    uint32_t storage_events);
+
 #ifdef __cplusplus
 }
 #endif

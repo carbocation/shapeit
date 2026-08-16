@@ -57,6 +57,11 @@ ambiguity codes to the packed haplotypes. It reconstructs the caller's fresh
 logical Philox stream from its stable coordinates and preserves the established
 draw sequence exactly; scheduling and thread identity never enter the ABI.
 
+`shapeit_genotype_solve_v1` performs final maximum-probability path decoding and
+applies stored missing-genotype consensus probabilities. The C++ adapter keeps
+the serialized compressed transition mask and passes only its ordered active
+indexes, avoiding any persistent memory expansion.
+
 ## PBWT initialization sweep
 
 `shapeit_pbwt_solve_chunk_v1` owns one complete PBWT initialization chunk,

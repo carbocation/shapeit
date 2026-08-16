@@ -95,7 +95,6 @@ public:
 	genotype(unsigned int);
 	~genotype();
 	void free();
-	void make(std::vector < unsigned char > &);
 	void build();
 	void sample(std::vector < double > &, std::vector < float > &, random_number_generator &);
 	void mapMerges(std::vector < double > &, double , std::vector < bool > &);

@@ -47,41 +47,26 @@ void genotype::sample(vector < double > & CurrentTransProbabilities, vector < fl
 }
 
 void genotype::solve() {
-	unsigned int curr_dipcount = 0, prev_dipcount = 1;
-	vector < vector < double > > maxProbs = vector < vector < double > > (n_segments, vector < double > ());
-	vector < vector < int > > maxIndexes = vector < vector < int > > (n_segments, vector < int > ());
-
-	for (int s = 0, toffset = 0, trel = 0 ; s < n_segments ; s ++) {
-		curr_dipcount = countDiplotypes(Diplotypes[s]);
-		maxProbs[s] = vector < double > (curr_dipcount, 0.0);
-		maxIndexes[s] = vector < int > (curr_dipcount, 0);
-		for (int t = 0 ; t < prev_dipcount * curr_dipcount ; t++) {
-			int prev_dip = t/curr_dipcount;
-			int next_dip = t%curr_dipcount;
-			//double currProb = (s?maxProbs[s-1][prev_dip]:1.0) * StoredProbs[t+toffset];
-			double currProb = (s?maxProbs[s-1][prev_dip]:1.0) * (ProbMask[t+toffset]?ProbStored[trel++]:1e-6);
-			if (currProb > maxProbs[s][next_dip]) {
-				maxProbs[s][next_dip] = currProb;
-				maxIndexes[s][next_dip] = prev_dip;
-			}
-		}
-		double sumProb = 0.0;
-		for (int d = 0 ; d < curr_dipcount ; d ++) sumProb += maxProbs[s][d];
-		for (int d = 0 ; d < curr_dipcount ; d ++) maxProbs[s][d] /= sumProb;
-		toffset += prev_dipcount * curr_dipcount;
-		prev_dipcount = curr_dipcount;
+	static_assert(sizeof(unsigned long) == sizeof(uint64_t));
+	if (ProbMask.size() != n_transitions) {
+		throw runtime_error("Stored genotype transition mask has an invalid length");
 	}
-
-	vector < unsigned char > DipSampled = vector < unsigned char >(n_segments, 0);
-	unsigned int bestDip = alg.imax(maxProbs.back());
-	makeDiplotypes(Diplotypes.back());
-	DipSampled.back() = curr_dipcodes[bestDip];
-	for (int s = DipSampled.size() - 2 ; s >= 0 ; s --) {
-		bestDip = maxIndexes[s+1][bestDip];
-		makeDiplotypes(Diplotypes[s]);
-		DipSampled[s] = curr_dipcodes[bestDip];
+	vector < uint32_t > stored_indexes;
+	stored_indexes.reserve(n_stored_transitionProbs);
+	for (uint32_t transition = 0 ; transition < ProbMask.size() ; transition ++) {
+		if (ProbMask[transition]) stored_indexes.push_back(transition);
 	}
-	make(DipSampled);
+	const uint32_t status = shapeit_genotype_solve_v1(
+		Variants.data(), Variants.size(), n_variants,
+		Ambiguous.data(), Ambiguous.size(),
+		reinterpret_cast<const uint64_t *>(Diplotypes.data()), Diplotypes.size(),
+		Lengths.data(), Lengths.size(), stored_indexes.data(), stored_indexes.size(),
+		ProbStored.data(), ProbStored.size(), ProbMissing.data(), ProbMissing.size(),
+		haploid, n_storage_events);
+	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
+		throw runtime_error("Rust genotype solver rejected stored graph state (status " +
+			to_string(status) + ")");
+	}
 }
 
 void genotype::store(vector < double > & CurrentTransProbabilities, vector < float > & CurrentMissingProbabilities) {
