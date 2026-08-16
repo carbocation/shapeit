@@ -19,6 +19,18 @@ extern "C" {
 
 uint32_t shapeit_pbwt_abi_version(void);
 
+uint32_t shapeit_pbwt_select_sites_v1(
+    const uint8_t * evaluated_sites,
+    size_t evaluated_sites_length,
+    const int32_t * site_groups,
+    size_t site_groups_length,
+    size_t group_count,
+    uint64_t seed,
+    uint32_t domain,
+    uint32_t iteration,
+    uint8_t * selected_sites,
+    size_t selected_sites_length);
+
 uint32_t shapeit_pbwt_solve_chunk_v1(
     uint8_t * haplotypes,
     size_t haplotypes_length,

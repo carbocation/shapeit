@@ -1,5 +1,7 @@
 use core::slice;
 
+use crate::genotype::LogicalRng;
+
 const ABI_VERSION: u32 = 1;
 const STATUS_OK: u32 = 0;
 const STATUS_NULL_POINTER: u32 = 1;
@@ -763,6 +765,81 @@ pub extern "C" fn shapeit_pbwt_abi_version() -> u32 {
 }
 
 #[no_mangle]
+/// Select exactly one evaluated locus per PBWT group from logical RNG streams.
+///
+/// Each group uses `(seed, domain, iteration, group)` as its complete stream
+/// coordinate, so selection is independent of thread scheduling.
+///
+/// # Safety
+///
+/// Input and output buffers must be valid for their stated lengths and must not
+/// overlap. Invalid layouts are rejected before `selected_sites` is modified.
+pub unsafe extern "C" fn shapeit_pbwt_select_sites_v1(
+    evaluated_sites: *const u8,
+    evaluated_sites_length: usize,
+    site_groups: *const i32,
+    site_groups_length: usize,
+    group_count: usize,
+    seed: u64,
+    domain: u32,
+    iteration: u32,
+    selected_sites: *mut u8,
+    selected_sites_length: usize,
+) -> u32 {
+    if evaluated_sites.is_null() || site_groups.is_null() || selected_sites.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    if evaluated_sites_length == 0
+        || group_count == 0
+        || site_groups_length != evaluated_sites_length
+        || selected_sites_length != evaluated_sites_length
+    {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    let evaluated_sites = slice::from_raw_parts(evaluated_sites, evaluated_sites_length);
+    let site_groups = slice::from_raw_parts(site_groups, site_groups_length);
+    if evaluated_sites.iter().any(|&value| value > 1) {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    let mut counts = vec![0u32; group_count];
+    for (locus, &group) in site_groups.iter().enumerate() {
+        if group < 0 || group as usize >= group_count {
+            return STATUS_OUT_OF_BOUNDS;
+        }
+        if evaluated_sites[locus] != 0 {
+            counts[group as usize] = match counts[group as usize].checked_add(1) {
+                Some(value) => value,
+                None => return STATUS_INTEGER_OVERFLOW,
+            };
+        }
+    }
+    let mut choices = vec![0u32; group_count];
+    for (group, (&count, choice)) in counts.iter().zip(choices.iter_mut()).enumerate() {
+        if count != 0 {
+            let item = match u64::try_from(group) {
+                Ok(value) => value,
+                Err(_) => return STATUS_INTEGER_OVERFLOW,
+            };
+            *choice = LogicalRng::new(seed, domain, iteration, item).next_bounded(count);
+        }
+    }
+    let selected_sites = slice::from_raw_parts_mut(selected_sites, selected_sites_length);
+    selected_sites.fill(0);
+    let mut observed = vec![0u32; group_count];
+    for (locus, &group) in site_groups.iter().enumerate() {
+        if evaluated_sites[locus] == 0 {
+            continue;
+        }
+        let group = group as usize;
+        if observed[group] == choices[group] {
+            selected_sites[locus] = 1;
+        }
+        observed[group] += 1;
+    }
+    STATUS_OK
+}
+
+#[no_mangle]
 /// Replay and solve one independently writable PBWT initialization chunk.
 ///
 /// Concurrent calls may share inputs and `haplotypes` only when their chunk
@@ -1025,6 +1102,36 @@ pub unsafe extern "C" fn shapeit_pbwt_transpose_neighbors_v1(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn site_selection_uses_one_logical_stream_per_group() {
+        let evaluated = [1u8, 0, 1, 1, 1, 0, 1];
+        let groups = [0i32, 0, 0, 1, 1, 2, 2];
+        let mut selected = [0xa5u8; 7];
+        let status = unsafe {
+            shapeit_pbwt_select_sites_v1(
+                evaluated.as_ptr(),
+                evaluated.len(),
+                groups.as_ptr(),
+                groups.len(),
+                3,
+                15_052_011,
+                1,
+                4,
+                selected.as_mut_ptr(),
+                selected.len(),
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        let candidates = [vec![0usize, 2], vec![3usize, 4], vec![6usize]];
+        let mut expected = [0u8; 7];
+        for (group, loci) in candidates.iter().enumerate() {
+            let chosen = LogicalRng::new(15_052_011, 1, 4, group as u64)
+                .next_bounded(loci.len() as u32) as usize;
+            expected[loci[chosen]] = 1;
+        }
+        assert_eq!(selected, expected);
+    }
 
     #[test]
     fn selection_preserves_pbwt_neighbor_order_and_transpose_layout() {

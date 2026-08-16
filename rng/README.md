@@ -90,11 +90,12 @@ ordering/divergence updates. C++ retains only chunk scheduling and progress
 reporting. Parallel chunks consume immutable prefix snapshots and write disjoint
 locus rows, so logical results do not depend on worker assignment.
 
-`shapeit_pbwt_select_chunk_v1` likewise owns the iterative common-phasing PBWT
-ordering/divergence scan and IBD2-aware neighbour search. C++ flattens its
-collapsed IBD2 tracks once per sweep and schedules disjoint chunks; Rust then
-transposes the completed neighbour slabs directly into the haplotype-major
-layout borrowed by the conditioning jobs.
+`shapeit_pbwt_select_sites_v1` first chooses one evaluated locus per PBWT group
+from stable group-specific Philox streams. `shapeit_pbwt_select_chunk_v1` then
+owns the iterative common-phasing PBWT ordering/divergence scan and IBD2-aware
+neighbour search. C++ flattens its collapsed IBD2 tracks once per sweep and
+schedules disjoint chunks; Rust transposes the completed neighbour slabs
+directly into the haplotype-major layout borrowed by the conditioning jobs.
 
 ## Random-number generation
 
