@@ -68,13 +68,18 @@ pub struct ConditioningTrackV1 {
 
 #[derive(Default)]
 pub struct ConditioningJobV1 {
-    windows: Vec<GenotypeWindowV1>,
-    states: Vec<Vec<u32>>,
+    pub(crate) windows: Vec<GenotypeWindowV1>,
+    pub(crate) states: Vec<Vec<u32>>,
     tracks: Vec<ConditioningTrackV1>,
     used_fallback: Vec<bool>,
     seen: Vec<u32>,
     seen_epoch: u32,
     ordering: Vec<u32>,
+    pub(crate) subset_haplotypes: Vec<u8>,
+    pub(crate) single_scratch: Vec<f32>,
+    pub(crate) double_scratch: Vec<f64>,
+    pub(crate) alpha_locus_scratch: Vec<i32>,
+    pub(crate) index_scratch: Vec<usize>,
 }
 
 struct ConditioningInputs<'a> {
@@ -186,6 +191,7 @@ fn collect_conditioning_states(
         seen,
         seen_epoch,
         ordering,
+        ..
     } = job;
     *job_windows = windows;
     if states.len() < job_windows.len() {

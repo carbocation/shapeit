@@ -47,48 +47,22 @@ void phaser::phaseWindow(int id_worker, int id_job) {
 	threadData[id_worker].make(id_job, options["hmm-window"].as < double > (), window_rng, fallback_rng);
 	int underflow_recovered_summing = 0;
 	int underflow_recovered_precision = 0;
-	bool require_double_precision = G.vecG[id_job]->requiresDoublePrecision();
 
-	//HMM compute in windows
+	//Collect window statistics
 	for (int w = 0 ; w < threadData[id_worker].size() ; w ++) {
 		if (options["thread"].as < int > () > 1) pthread_mutex_lock(&mutex_workers);
 		statH.push(threadData[id_worker].Kstates[w].size()*1.0);
 		statS.push(threadData[id_worker].Windows.W[w].lengthBP(V) * 1.0e-6);
 		if (options["thread"].as < int > () > 1) pthread_mutex_unlock(&mutex_workers);
+	}
 
-		int outcome = 0;
-
-		if (require_double_precision) {
-			//Run using double precision as underflow happened previously
-			outcome = run_haplotype_segment_double_rust(
-				G.vecG[id_job], H.H_opt_hap, threadData[id_worker].Kstates[w],
-				threadData[id_worker].Windows.W[w], M,
-				threadData[id_worker].T, threadData[id_worker].M);
-		} else {
-			//Try single precision as this is faster
-			outcome = run_haplotype_segment_single_rust(
-				G.vecG[id_job], H.H_opt_hap, threadData[id_worker].Kstates[w],
-				threadData[id_worker].Windows.W[w], M,
-				threadData[id_worker].T, threadData[id_worker].M);
-
-			//Underflow happening with single precision, rerun using double precision
-			if (outcome != 0) {
-				outcome = run_haplotype_segment_double_rust(
-					G.vecG[id_job], H.H_opt_hap, threadData[id_worker].Kstates[w],
-					threadData[id_worker].Windows.W[w], M,
-					threadData[id_worker].T, threadData[id_worker].M);
-				require_double_precision = true;
-				G.vecG[id_job]->requireDoublePrecision();
-				underflow_recovered_precision++;
-			}
-		}
-
-		//
-		switch (outcome) {
-		case -2: vrb.error("Diploid underflow impossible to recover for [" + G.vecG[id_job]->name + "]");
-		case -1: vrb.error("Haploid underflow impossible to recover for [" + G.vecG[id_job]->name + "]");
-		}
-		underflow_recovered_summing += outcome;
+	//Run all HMM windows inside the Rust-owned conditioning job
+	const int outcome = threadData[id_worker].runHMM(
+		G.vecG[id_job], H.H_opt_hap, M,
+		underflow_recovered_summing, underflow_recovered_precision);
+	switch (outcome) {
+	case -2: vrb.error("Diploid underflow impossible to recover for [" + G.vecG[id_job]->name + "]");
+	case -1: vrb.error("Haploid underflow impossible to recover for [" + G.vecG[id_job]->name + "]");
 	}
 
 	//Copy over new IBD2 constraints into H

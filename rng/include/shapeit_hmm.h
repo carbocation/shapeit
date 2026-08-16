@@ -12,6 +12,9 @@
 #define SHAPEIT_HMM_STATUS_OUT_OF_BOUNDS 3U
 #define SHAPEIT_HMM_STATUS_INTEGER_OVERFLOW 4U
 
+typedef struct shapeit_genotype_graph_v1 shapeit_genotype_graph_v1;
+typedef struct shapeit_conditioning_job_v1 shapeit_conditioning_job_v1;
+
 typedef struct {
     uint32_t abi_version;
     uint32_t struct_size;
@@ -118,11 +121,46 @@ typedef struct {
     size_t index_scratch_length;
 } shapeit_hmm_segment_single_v1;
 
+typedef struct {
+    uint32_t abi_version;
+    uint32_t struct_size;
+    shapeit_genotype_graph_v1 * graph;
+    shapeit_conditioning_job_v1 * conditioning_job;
+    const uint8_t * haplotypes;
+    size_t haplotypes_length;
+    size_t haplotype_stride;
+    const float * centimorgans;
+    size_t centimorgans_length;
+    const float * recombination;
+    size_t recombination_length;
+    const int8_t * rare_alleles;
+    size_t rare_alleles_length;
+    int32_t effective_population_size;
+    int32_t total_haplotypes;
+    double emission_match;
+    double emission_mismatch;
+    double * transition_probabilities;
+    size_t transition_probabilities_length;
+    float * missing_probabilities;
+    size_t missing_probabilities_length;
+} shapeit_hmm_job_v1;
+
+typedef struct {
+    int32_t underflow_recovered_summing;
+    uint32_t underflow_recovered_precision;
+    int32_t fatal_outcome;
+    size_t windows_completed;
+} shapeit_hmm_job_result_v1;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 uint32_t shapeit_hmm_abi_version(void);
+
+uint32_t shapeit_hmm_run_job_v1(
+    const shapeit_hmm_job_v1 * parameters,
+    shapeit_hmm_job_result_v1 * result);
 
 uint32_t shapeit_hmm_double_scratch_len_v1(
     size_t conditioning_haplotypes,

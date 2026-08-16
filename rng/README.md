@@ -95,8 +95,16 @@ and conditioning-state assembly. It collects and deduplicates the full PBWT
 neighbour set, applies Rust heterozygote-overlap IBD2 protection, and reproduces
 the logical fallback shuffle when a window has fewer than two states. The
 opaque Rust job retains the nested state vectors; C++ borrows immutable spans
-for the HMM and never copies or reallocates them. Each worker rebuilds the same
-opaque job in place so its scratch storage and vector capacities are reused.
+only for statistics and fallback warnings and never copies or reallocates them.
+Each worker rebuilds the same opaque job in place so its scratch storage and
+vector capacities are reused.
+
+`shapeit_hmm_run_job_v1` consumes that opaque job and a Rust-owned genotype
+graph in one call. Rust now owns the complete per-sample window loop, selected-
+haplotype transpose, reusable single- and double-precision workspaces,
+single-to-double underflow recovery, and the persistent precision decision.
+C++ retains progress statistics, error reporting, and iteration scheduling but
+no longer marshals or executes individual HMM segments.
 
 ## IBD2 registry
 

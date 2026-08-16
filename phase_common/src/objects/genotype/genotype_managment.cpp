@@ -99,21 +99,3 @@ void genotype::setHaploid() {
 			to_string(status) + ")");
 	}
 }
-
-bool genotype::requiresDoublePrecision() const {
-	uint8_t haploid = 0, double_precision = 0;
-	const uint32_t status = shapeit_genotype_graph_flags_v1(Graph, &haploid, &double_precision);
-	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
-		throw runtime_error("Rust genotype graph flags are unavailable (status " +
-			to_string(status) + ")");
-	}
-	return double_precision != 0;
-}
-
-void genotype::requireDoublePrecision() {
-	const uint32_t status = shapeit_genotype_graph_require_double_v1(Graph);
-	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
-		throw runtime_error("Rust genotype precision flag update failed (status " +
-			to_string(status) + ")");
-	}
-}

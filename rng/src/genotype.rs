@@ -175,6 +175,35 @@ impl GenotypeGraphV1 {
             transition_count: self.transition_count,
         }
     }
+
+    pub(crate) fn hmm_arrays(&self) -> (&[u8], &[u8], &[u16], &[u64]) {
+        (
+            &self.variants,
+            &self.ambiguous,
+            &self.segment_lengths,
+            &self.diplotypes,
+        )
+    }
+
+    pub(crate) fn hmm_dimensions(&self) -> (usize, usize, usize) {
+        (
+            self.variant_count,
+            self.transition_count as usize,
+            self.missing_count,
+        )
+    }
+
+    pub(crate) fn is_built(&self) -> bool {
+        self.built
+    }
+
+    pub(crate) fn requires_double_precision(&self) -> bool {
+        self.double_precision
+    }
+
+    pub(crate) fn require_double_precision(&mut self) {
+        self.double_precision = true;
+    }
 }
 
 impl GenotypeStorageV1 {

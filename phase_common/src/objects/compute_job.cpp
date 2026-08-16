@@ -22,6 +22,9 @@
 
 #include <objects/compute_job.h>
 #include <shapeit_conditioning.h>
+#include <shapeit_hmm.h>
+
+#include <objects/hmm_parameters.h>
 
 #include <cassert>
 #include <cstdint>
@@ -175,4 +178,41 @@ void compute_job::make(unsigned int ind, double min_window_size, random_number_g
 	for (size_t t = 0 ; t < tracks_length ; t ++) {
 		Kbanned.push_back({tracks[t].individual, tracks[t].from, tracks[t].to});
 	}
+}
+
+int compute_job::runHMM(genotype * genotype_graph, bitmatrix & haplotypes,
+	hmm_parameters & model, int & underflow_recovered_summing,
+	int & underflow_recovered_precision) {
+	shapeit_hmm_job_v1 parameters = {};
+	parameters.abi_version = SHAPEIT_HMM_ABI_VERSION;
+	parameters.struct_size = sizeof(parameters);
+	parameters.graph = genotype_graph->Graph;
+	parameters.conditioning_job = Conditioning;
+	parameters.haplotypes = haplotypes.bytes;
+	parameters.haplotypes_length = haplotypes.n_bytes;
+	parameters.haplotype_stride = haplotypes.n_cols >> 3;
+	parameters.centimorgans = model.cm.data();
+	parameters.centimorgans_length = model.cm.size();
+	parameters.recombination = model.t.data();
+	parameters.recombination_length = model.t.size();
+	parameters.rare_alleles = reinterpret_cast<const int8_t *>(model.rare_allele.data());
+	parameters.rare_alleles_length = model.rare_allele.size();
+	parameters.effective_population_size = model.Neff;
+	parameters.total_haplotypes = model.Nhap;
+	parameters.emission_match = model.ee;
+	parameters.emission_mismatch = model.ed;
+	parameters.transition_probabilities = T.data();
+	parameters.transition_probabilities_length = T.size();
+	parameters.missing_probabilities = M.data();
+	parameters.missing_probabilities_length = M.size();
+
+	shapeit_hmm_job_result_v1 result = {};
+	const uint32_t status = shapeit_hmm_run_job_v1(&parameters, &result);
+	if (status != SHAPEIT_HMM_STATUS_OK) {
+		throw runtime_error("Rust HMM job rejected its input layout (status " +
+			to_string(status) + ")");
+	}
+	underflow_recovered_summing = result.underflow_recovered_summing;
+	underflow_recovered_precision = result.underflow_recovered_precision;
+	return result.fatal_outcome;
 }

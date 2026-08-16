@@ -73,8 +73,6 @@ public:
 	std::span < const unsigned char > packedVariants() const;
 	bool isHaploid() const;
 	void setHaploid();
-	bool requiresDoublePrecision() const;
-	void requireDoublePrecision();
 };
 
 #endif

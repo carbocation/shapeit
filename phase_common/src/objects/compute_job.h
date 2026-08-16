@@ -34,6 +34,7 @@
 #include <containers/window_set.h>
 
 struct shapeit_conditioning_job_v1;
+class hmm_parameters;
 
 class compute_job {
 public:
@@ -62,6 +63,7 @@ public:
 
 	void free();
 	void make(unsigned int, double, random_number_generator &, random_number_generator &);
+	int runHMM(genotype *, bitmatrix &, hmm_parameters &, int &, int &);
 	unsigned int size();
 };
 
