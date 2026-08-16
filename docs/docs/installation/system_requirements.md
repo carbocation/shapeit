@@ -21,7 +21,7 @@ permalink: /docs/installation/build_from_source/system_requirements
 SHAPEIT5 is primarily a set of C++ tools covering the process of haplotype
 phasing in large datasets. Building from source requires a modern Linux
 operating system, a C++20 compiler, and the Rust toolchain (`cargo` and
-`rustc` 1.85 or newer) for the versioned random-number kernel. We recommend
+`rustc` 1.85 or newer) for the versioned phasing kernels. We recommend
 using current stable compiler releases.
 
 For example running the following instruction on Ubuntu 20.04 focal:

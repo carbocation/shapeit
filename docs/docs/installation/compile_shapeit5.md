@@ -35,7 +35,7 @@ You'll find there a folder containing all the software packages are other utilit
 - **ligate**: ligate multiple phased BCF/VCF files into a chromosome length file
 - **phase_common**: phase common sites, typically SNP array data
 - **phase_rare**: phase rare variants onto a scaffold of common variants
-- **rng**: versioned Rust RNG and bitmatrix kernels, built automatically
+- **rng**: versioned Rust phasing kernels, built automatically
 - **resources**: genetics maps [b37/b38] and coordinates for [5/20] cM chunks  
 - **static_bins**: static binaries of all executables
 - **switch**: compute switch error rate and genotyping error rate given simulated or trio data
@@ -70,6 +70,6 @@ locate libboost_program_options.a libboost_iostreams.a libhts.a
 </div>
 
 Once all paths are correctly set up, proceed with the compilation using
-`make`. Cargo builds the RNG static library automatically. The binary can be
+`make`. Cargo builds the Rust phasing-kernel static library automatically. The binary can be
 found in the `bin/` folder of each tool. You will need to copy the modified
 makefile into each SHAPEIT5 tool folder.
