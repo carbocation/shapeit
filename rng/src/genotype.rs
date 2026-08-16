@@ -1235,6 +1235,9 @@ pub unsafe extern "C" fn shapeit_genotype_windows_v1(
         Ok(value) => value,
         Err(status) => return status,
     };
+    if segments.len() > i32::MAX as usize {
+        return STATUS_INTEGER_OVERFLOW;
+    }
     let mut rng = LogicalRng::new(seed, domain, iteration, item);
     let ranges = split_windows(
         f64::from(minimum_window_centimorgans),
