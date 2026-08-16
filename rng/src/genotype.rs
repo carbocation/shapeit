@@ -153,6 +153,7 @@ pub struct GenotypeGraphV1 {
     segment_lengths: Vec<u16>,
     missing_count: usize,
     transition_count: u32,
+    storage: Option<GenotypeStorageV1>,
 }
 
 impl GenotypeGraphV1 {
@@ -871,6 +872,7 @@ impl GenotypeGraphV1 {
             segment_lengths,
             missing_count: sizes.missing,
             transition_count,
+            storage: None,
         }
     }
 }
@@ -2360,6 +2362,83 @@ pub unsafe extern "C" fn shapeit_genotype_storage_borrow_v1(
 }
 
 #[no_mangle]
+/// Accumulate one probability set in storage owned by a Rust genotype graph.
+///
+/// # Safety
+///
+/// `graph` must be live and exclusively borrowed. Probability buffers must be
+/// readable for their stated lengths.
+pub unsafe extern "C" fn shapeit_genotype_graph_store_v1(
+    graph: *mut GenotypeGraphV1,
+    transition_probabilities: *const f64,
+    transition_probabilities_length: usize,
+    missing_probabilities: *const f32,
+    missing_probabilities_length: usize,
+) -> u32 {
+    if graph.is_null()
+        || (transition_probabilities_length != 0 && transition_probabilities.is_null())
+        || (missing_probabilities_length != 0 && missing_probabilities.is_null())
+    {
+        return STATUS_NULL_POINTER;
+    }
+    let graph = &mut *graph;
+    let expected_missing = match graph.missing_count.checked_mul(8) {
+        Some(value) => value,
+        None => return STATUS_INTEGER_OVERFLOW,
+    };
+    if transition_probabilities_length != graph.transition_count as usize
+        || missing_probabilities_length != expected_missing
+    {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    let transition_probabilities = if transition_probabilities_length == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(transition_probabilities, transition_probabilities_length)
+    };
+    let missing_probabilities = if missing_probabilities_length == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(missing_probabilities, missing_probabilities_length)
+    };
+    match graph.storage.as_mut() {
+        Some(storage) => match storage.update(transition_probabilities, missing_probabilities) {
+            Ok(()) => STATUS_OK,
+            Err(status) => status,
+        },
+        None => match GenotypeStorageV1::new(transition_probabilities, missing_probabilities) {
+            Ok(storage) => {
+                graph.storage = Some(storage);
+                STATUS_OK
+            }
+            Err(status) => status,
+        },
+    }
+}
+
+#[no_mangle]
+/// Borrow probability storage retained by a Rust genotype graph.
+///
+/// # Safety
+///
+/// `graph` must be live and `view` writable. Returned pointers remain valid
+/// until the next mutable graph call.
+pub unsafe extern "C" fn shapeit_genotype_graph_storage_borrow_v1(
+    graph: *const GenotypeGraphV1,
+    view: *mut GenotypeStorageViewV1,
+) -> u32 {
+    if graph.is_null() || view.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let storage = match (*graph).storage.as_ref() {
+        Some(value) => value,
+        None => return STATUS_INVALID_DIMENSIONS,
+    };
+    *view = storage.view();
+    STATUS_OK
+}
+
+#[no_mangle]
 /// Solve a genotype graph directly from Rust-owned accumulated storage.
 ///
 /// # Safety
@@ -2431,6 +2510,45 @@ pub unsafe extern "C" fn shapeit_genotype_graph_solve_storage_v1(
         graph.segment_lengths.len(),
         storage,
         haploid,
+    )
+}
+
+#[no_mangle]
+/// Solve a Rust-owned genotype graph from its internally retained storage.
+///
+/// # Safety
+///
+/// `graph` must be live and exclusively borrowed.
+pub unsafe extern "C" fn shapeit_genotype_graph_solve_v1(
+    graph: *mut GenotypeGraphV1,
+    haploid: u8,
+) -> u32 {
+    if graph.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let graph = &mut *graph;
+    let storage = match graph.storage.as_ref() {
+        Some(value) => value,
+        None => return STATUS_INVALID_DIMENSIONS,
+    };
+    shapeit_genotype_solve_v1(
+        graph.variants.as_mut_ptr(),
+        graph.variants.len(),
+        graph.variant_count,
+        graph.ambiguous.as_ptr(),
+        graph.ambiguous.len(),
+        graph.diplotypes.as_ptr(),
+        graph.diplotypes.len(),
+        graph.segment_lengths.as_ptr(),
+        graph.segment_lengths.len(),
+        storage.transition_indexes.as_ptr(),
+        storage.transition_indexes.len(),
+        storage.transition_probabilities.as_ptr(),
+        storage.transition_probabilities.len(),
+        storage.missing_probabilities.as_ptr(),
+        storage.missing_probabilities.len(),
+        haploid,
+        storage.storage_events,
     )
 }
 
@@ -2885,6 +3003,51 @@ mod tests {
             );
             shapeit_genotype_graph_free_v1(graph);
         }
+    }
+
+    #[test]
+    fn owned_graph_retains_probability_storage_through_solving() {
+        let variants = pack(&[3 | 4]);
+        let mut graph = Box::new(GenotypeGraphV1::new(&variants, 1));
+        let probabilities = vec![1.0f64; graph.transition_count as usize];
+        let first_status = unsafe {
+            shapeit_genotype_graph_store_v1(
+                graph.as_mut(),
+                probabilities.as_ptr(),
+                probabilities.len(),
+                core::ptr::null(),
+                0,
+            )
+        };
+        let second_status = unsafe {
+            shapeit_genotype_graph_store_v1(
+                graph.as_mut(),
+                probabilities.as_ptr(),
+                probabilities.len(),
+                core::ptr::null(),
+                0,
+            )
+        };
+        assert_eq!(first_status, STATUS_OK);
+        assert_eq!(second_status, STATUS_OK);
+
+        let mut storage_view = GenotypeStorageViewV1 {
+            transition_count: 0,
+            transition_mask: core::ptr::null(),
+            transition_mask_length: 0,
+            transition_probabilities: core::ptr::null(),
+            transition_probabilities_length: 0,
+            missing_probabilities: core::ptr::null(),
+            missing_probabilities_length: 0,
+            storage_events: 0,
+        };
+        let borrow_status =
+            unsafe { shapeit_genotype_graph_storage_borrow_v1(graph.as_ref(), &mut storage_view) };
+        assert_eq!(borrow_status, STATUS_OK);
+        assert_eq!(storage_view.transition_count, probabilities.len());
+        assert_eq!(storage_view.storage_events, 2);
+        let solve_status = unsafe { shapeit_genotype_graph_solve_v1(graph.as_mut(), 0) };
+        assert_eq!(solve_status, STATUS_OK);
     }
 
     #[test]

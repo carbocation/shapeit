@@ -43,7 +43,7 @@ void genotype::sample(vector < double > & CurrentTransProbabilities, vector < fl
 }
 
 void genotype::solve() {
-	const uint32_t status = shapeit_genotype_graph_solve_storage_v1(Graph, Storage, haploid);
+	const uint32_t status = shapeit_genotype_graph_solve_v1(Graph, haploid);
 	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
 		throw runtime_error("Rust genotype solver rejected stored graph state (status " +
 			to_string(status) + ")");
@@ -56,15 +56,15 @@ void genotype::store(vector < double > & CurrentTransProbabilities, vector < flo
 		CurrentMissingProbabilities.size() < missing_probabilities) {
 		throw runtime_error("Current genotype probabilities are shorter than the graph layout");
 	}
-	uint32_t status = shapeit_genotype_storage_update_v1(
-		&Storage, CurrentTransProbabilities.data(), n_transitions,
+	uint32_t status = shapeit_genotype_graph_store_v1(
+		Graph, CurrentTransProbabilities.data(), n_transitions,
 		CurrentMissingProbabilities.data(), missing_probabilities);
 	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
 		throw runtime_error("Rust genotype storage rejected current probabilities (status " +
 			to_string(status) + ")");
 	}
 	shapeit_genotype_storage_view_v1 view = {};
-	status = shapeit_genotype_storage_borrow_v1(Storage, &view);
+	status = shapeit_genotype_graph_storage_borrow_v1(Graph, &view);
 	if (status != SHAPEIT_GENOTYPE_STATUS_OK || view.transition_count != n_transitions) {
 		throw runtime_error("Rust genotype storage returned an invalid view");
 	}

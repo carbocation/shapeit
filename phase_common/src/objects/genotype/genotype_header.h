@@ -63,9 +63,6 @@ public:
 	std::vector < unsigned char > Variants;
 	shapeit_genotype_graph_v1 * Graph;
 
-	//PHASE PROBS
-	shapeit_genotype_storage_v1 * Storage;
-
 	//METHODS
 	genotype(unsigned int);
 	~genotype();

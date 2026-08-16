@@ -205,6 +205,17 @@ uint32_t shapeit_genotype_storage_borrow_v1(
     const shapeit_genotype_storage_v1 * storage,
     shapeit_genotype_storage_view_v1 * view);
 
+uint32_t shapeit_genotype_graph_store_v1(
+    shapeit_genotype_graph_v1 * graph,
+    const double * transition_probabilities,
+    size_t transition_probabilities_length,
+    const float * missing_probabilities,
+    size_t missing_probabilities_length);
+
+uint32_t shapeit_genotype_graph_storage_borrow_v1(
+    const shapeit_genotype_graph_v1 * graph,
+    shapeit_genotype_storage_view_v1 * view);
+
 uint32_t shapeit_genotype_solve_storage_v1(
     uint8_t * variants,
     size_t variants_length,
@@ -221,6 +232,10 @@ uint32_t shapeit_genotype_solve_storage_v1(
 uint32_t shapeit_genotype_graph_solve_storage_v1(
     shapeit_genotype_graph_v1 * graph,
     const shapeit_genotype_storage_v1 * storage,
+    uint8_t haploid);
+
+uint32_t shapeit_genotype_graph_solve_v1(
+    shapeit_genotype_graph_v1 * graph,
     uint8_t haploid);
 
 uint32_t shapeit_genotype_windows_v1(

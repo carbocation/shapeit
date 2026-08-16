@@ -63,11 +63,11 @@ draw sequence exactly; scheduling and thread identity never enter the ABI.
 `shapeit_genotype_solve_v1` performs final maximum-probability path decoding and
 applies stored missing-genotype consensus probabilities.
 
-The opaque `shapeit_genotype_storage_v1` now owns that persistent main-iteration
-state: the thresholded transition mask, ordered active indexes, accumulated
-transition and missing probabilities, and storage-event count. Final solving
-borrows it directly, while the graph writer receives a read-only view using the
-legacy LSB-first mask encoding.
+The opaque graph also owns persistent main-iteration state: the thresholded
+transition mask, ordered active indexes, accumulated transition and missing
+probabilities, and storage-event count. Final solving reads it in place, while
+the graph writer receives a read-only view using the legacy LSB-first mask
+encoding. The standalone storage ABI remains available for external callers.
 
 Pedigree scaffolding and the established haploid-heterozygote reset operate on
 whole packed samples through checked Rust calls. `shapeit_genotype_prune_v1`

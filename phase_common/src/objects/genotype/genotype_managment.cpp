@@ -36,7 +36,6 @@ genotype::genotype(unsigned int _index) {
 	n_stored_transitionProbs = 0;
 	n_storage_events = 0;
 	Graph = nullptr;
-	Storage = nullptr;
 	this->name = "";
 	double_precision = false;
 	haploid = false;
@@ -50,10 +49,6 @@ void genotype::free() {
 	if (Graph != nullptr) {
 		shapeit_genotype_graph_free_v1(Graph);
 		Graph = nullptr;
-	}
-	if (Storage != nullptr) {
-		shapeit_genotype_storage_free_v1(Storage);
-		Storage = nullptr;
 	}
 	name = "";
 	vector < unsigned char > ().swap(Variants);

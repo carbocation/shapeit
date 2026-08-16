@@ -90,7 +90,7 @@ void graph_writer::writeGraphs(string fname) {
 		if (graph.segment_lengths_length)
 			fd.write(reinterpret_cast<const char *>(graph.segment_lengths), graph.segment_lengths_length * sizeof(uint16_t));
 		shapeit_genotype_storage_view_v1 view = {};
-		const uint32_t status = shapeit_genotype_storage_borrow_v1(G.vecG[g]->Storage, &view);
+		const uint32_t status = shapeit_genotype_graph_storage_borrow_v1(G.vecG[g]->Graph, &view);
 		if (status != SHAPEIT_GENOTYPE_STATUS_OK ||
 			view.transition_count != G.vecG[g]->n_transitions ||
 			view.transition_mask_length != (view.transition_count + 7) / 8 ||
