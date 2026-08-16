@@ -4,12 +4,65 @@ use super::*;
 use core::arch::asm;
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{
-    __m128, __m256, _mm256_add_ps, _mm256_and_si256, _mm256_blendv_ps, _mm256_castps128_ps256,
-    _mm256_castsi256_ps, _mm256_cvtps_pd, _mm256_fmadd_ps, _mm256_insertf128_ps, _mm256_loadu_ps,
-    _mm256_mul_ps, _mm256_set1_epi32, _mm256_set1_ps, _mm256_setr_epi32, _mm256_setr_ps,
-    _mm256_setzero_ps, _mm256_slli_epi32, _mm256_srlv_epi32, _mm256_storeu_ps, _mm256_xor_si256,
-    _mm_loadu_ps, _mm_set1_ps, _mm_setr_ps, _mm_storeu_ps,
+    __cpuid, __m128, __m256, _mm256_add_ps, _mm256_and_si256, _mm256_blendv_ps,
+    _mm256_castps128_ps256, _mm256_castsi256_ps, _mm256_cvtps_pd, _mm256_fmadd_ps,
+    _mm256_insertf128_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_epi32, _mm256_set1_ps,
+    _mm256_setr_epi32, _mm256_setr_ps, _mm256_setzero_ps, _mm256_slli_epi32, _mm256_srlv_epi32,
+    _mm256_storeu_ps, _mm256_xor_si256, _mm_loadu_ps, _mm_set1_ps, _mm_setr_ps, _mm_storeu_ps,
 };
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn intel_family_model(eax: u32) -> (u32, u32) {
+    let base_family = (eax >> 8) & 0x0f;
+    let family = if base_family == 0x0f {
+        base_family + ((eax >> 20) & 0xff)
+    } else {
+        base_family
+    };
+    let base_model = (eax >> 4) & 0x0f;
+    let model = if matches!(base_family, 0x06 | 0x0f) {
+        base_model | (((eax >> 16) & 0x0f) << 4)
+    } else {
+        base_model
+    };
+    (family, model)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn intel_avx512_full_model_allowed(eax: u32) -> bool {
+    let (family, model) = intel_family_model(eax);
+    family == 6 && matches!(model, 0x8f | 0xcf)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn avx512_full_kernel_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(detect_avx512_full_kernel)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn detect_avx512_full_kernel() -> bool {
+    if !std::arch::is_x86_feature_detected!("avx512f") {
+        return false;
+    }
+    // The paired-ZMM kernel loses on Cascade Lake but wins on measured
+    // Sapphire Rapids (model 0x8f) and Emerald Rapids (model 0xcf).
+    let vendor = __cpuid(0);
+    if [vendor.ebx, vendor.edx, vendor.ecx]
+        != [
+            u32::from_le_bytes(*b"Genu"),
+            u32::from_le_bytes(*b"ineI"),
+            u32::from_le_bytes(*b"ntel"),
+        ]
+    {
+        return false;
+    }
+    let version = __cpuid(1);
+    intel_avx512_full_model_allowed(version.eax)
+}
 
 #[repr(C)]
 pub struct HmmSegmentSingleV1 {
@@ -274,6 +327,8 @@ struct SingleEngine<'a> {
     effective_population_size: i32,
     total_haplotypes: i32,
     mismatch: f32,
+    #[cfg(target_arch = "x86_64")]
+    avx512: bool,
 
     segment_first: usize,
     segment_last: usize,
@@ -908,15 +963,27 @@ impl SingleEngine<'_> {
             let emission_zero = _mm256_loadu_ps(emission_zero.as_ptr());
             let emission_one = _mm256_loadu_ps(emission_one.as_ptr());
             let block_count = self.conditioning_haplotypes / HAPLOTYPES;
-            vector_sums = Self::run_full_ambiguous_blocks_avx2(
-                probability,
-                allele_bytes,
-                block_count,
-                stay,
-                transferred,
-                emission_zero,
-                emission_one,
-            );
+            vector_sums = if self.avx512 {
+                Self::run_full_ambiguous_blocks_avx512(
+                    probability,
+                    allele_bytes,
+                    block_count,
+                    stay,
+                    transferred,
+                    code,
+                    self.mismatch,
+                )
+            } else {
+                Self::run_full_ambiguous_blocks_avx2(
+                    probability,
+                    allele_bytes,
+                    block_count,
+                    stay,
+                    transferred,
+                    emission_zero,
+                    emission_one,
+                )
+            };
             k = block_count * HAPLOTYPES;
             probability_index = block_count * HAPLOTYPES * HAPLOTYPES;
             while k < self.conditioning_haplotypes {
@@ -942,15 +1009,27 @@ impl SingleEngine<'_> {
         } else {
             const FULL_BLOCK_FLOATS: usize = HAPLOTYPES * HAPLOTYPES;
             let block_count = self.conditioning_haplotypes / HAPLOTYPES;
-            vector_sums = Self::run_full_hom_blocks_avx2(
-                probability,
-                allele_bytes,
-                block_count,
-                stay,
-                transferred,
-                mismatch,
-                genotype_allele,
-            );
+            vector_sums = if self.avx512 {
+                Self::run_full_hom_blocks_avx512(
+                    probability,
+                    allele_bytes,
+                    block_count,
+                    stay,
+                    transferred,
+                    self.mismatch,
+                    genotype_allele,
+                )
+            } else {
+                Self::run_full_hom_blocks_avx2(
+                    probability,
+                    allele_bytes,
+                    block_count,
+                    stay,
+                    transferred,
+                    mismatch,
+                    genotype_allele,
+                )
+            };
             k = block_count * HAPLOTYPES;
             probability_index = block_count * FULL_BLOCK_FLOATS;
             while k < self.conditioning_haplotypes {
@@ -1159,6 +1238,305 @@ impl SingleEngine<'_> {
             options(nostack),
         );
         [sum0, sum1, sum2, sum3, sum4, sum5, sum6, sum7]
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline(never)]
+    #[target_feature(enable = "avx2,fma,avx512f")]
+    unsafe fn run_full_hom_blocks_avx512(
+        probability: *mut f32,
+        allele_bytes: *const u8,
+        block_count: usize,
+        stay: __m256,
+        transferred: __m256,
+        mismatch: f32,
+        genotype_allele: bool,
+    ) -> [__m256; HAPLOTYPES] {
+        let mut stay_pair = [0.0f32; 2 * HAPLOTYPES];
+        let mut transferred_pair = [0.0f32; 2 * HAPLOTYPES];
+        _mm256_storeu_ps(stay_pair.as_mut_ptr(), stay);
+        _mm256_storeu_ps(stay_pair.as_mut_ptr().add(HAPLOTYPES), stay);
+        _mm256_storeu_ps(transferred_pair.as_mut_ptr(), transferred);
+        _mm256_storeu_ps(transferred_pair.as_mut_ptr().add(HAPLOTYPES), transferred);
+
+        // Each two-bit code selects the conditioning-state halves that need
+        // the mismatch multiplier. Opmasks replace a 64-byte emission-vector
+        // lookup while retaining the exact independent AVX2 reduction lanes.
+        let mismatch_masks = [0x0000u16, 0xff00, 0x00ff, 0xffff];
+        let mismatch_pair = [mismatch; 2 * HAPLOTYPES];
+
+        let probability_cursor = probability;
+        let allele_cursor = allele_bytes;
+        let blocks = block_count;
+        let genotype_mask = if genotype_allele { u8::MAX as usize } else { 0 };
+        let stay_pair_ptr = stay_pair.as_ptr();
+        let transferred_pair_ptr = transferred_pair.as_ptr();
+        let mismatch_masks_ptr = mismatch_masks.as_ptr();
+        let mismatch_pair_ptr = mismatch_pair.as_ptr();
+        let mut sum_lanes = [0.0f32; HAPLOTYPES * HAPLOTYPES];
+        let sum_lanes_ptr = sum_lanes.as_mut_ptr();
+
+        asm!(
+            "vmovups zmm5, zmmword ptr [{stay_pair}]",
+            "vmovups zmm6, zmmword ptr [{transferred_pair}]",
+            "vmovups zmm7, zmmword ptr [{mismatch_pair}]",
+            "vpxord zmm0, zmm0, zmm0",
+            "vpxord zmm1, zmm1, zmm1",
+            "vpxord zmm2, zmm2, zmm2",
+            "vpxord zmm3, zmm3, zmm3",
+            "test {blocks}, {blocks}",
+            "jz 8f",
+            "2:",
+            "movzx {packed:e}, byte ptr [{alleles}]",
+            "xor {packed}, {genotype_mask}",
+            "test {packed:e}, {packed:e}",
+            "jz 4f",
+
+            "mov {code}, {packed}",
+            "shr {code}, 6",
+            "and {code}, 3",
+            "movzx {code:e}, word ptr [{mismatch_masks} + {code}*2]",
+            "kmovw k1, {code:e}",
+            "vmovups zmm4, zmmword ptr [{probability} + 0]",
+            "vfmadd132ps zmm4, zmm6, zmm5",
+            "vmulps zmm4 {{k1}}, zmm4, zmm7",
+            "vaddps zmm0, zmm0, zmm4",
+            "vmovups zmmword ptr [{probability} + 0], zmm4",
+
+            "mov {code}, {packed}",
+            "shr {code}, 4",
+            "and {code}, 3",
+            "movzx {code:e}, word ptr [{mismatch_masks} + {code}*2]",
+            "kmovw k1, {code:e}",
+            "vmovups zmm4, zmmword ptr [{probability} + 64]",
+            "vfmadd132ps zmm4, zmm6, zmm5",
+            "vmulps zmm4 {{k1}}, zmm4, zmm7",
+            "vaddps zmm1, zmm1, zmm4",
+            "vmovups zmmword ptr [{probability} + 64], zmm4",
+
+            "mov {code}, {packed}",
+            "shr {code}, 2",
+            "and {code}, 3",
+            "movzx {code:e}, word ptr [{mismatch_masks} + {code}*2]",
+            "kmovw k1, {code:e}",
+            "vmovups zmm4, zmmword ptr [{probability} + 128]",
+            "vfmadd132ps zmm4, zmm6, zmm5",
+            "vmulps zmm4 {{k1}}, zmm4, zmm7",
+            "vaddps zmm2, zmm2, zmm4",
+            "vmovups zmmword ptr [{probability} + 128], zmm4",
+
+            "mov {code}, {packed}",
+            "and {code}, 3",
+            "movzx {code:e}, word ptr [{mismatch_masks} + {code}*2]",
+            "kmovw k1, {code:e}",
+            "vmovups zmm4, zmmword ptr [{probability} + 192]",
+            "vfmadd132ps zmm4, zmm6, zmm5",
+            "vmulps zmm4 {{k1}}, zmm4, zmm7",
+            "vaddps zmm3, zmm3, zmm4",
+            "vmovups zmmword ptr [{probability} + 192], zmm4",
+            "jmp 6f",
+
+            "4:",
+            "vmovups zmm4, zmmword ptr [{probability} + 0]",
+            "vfmadd132ps zmm4, zmm6, zmm5",
+            "vaddps zmm0, zmm0, zmm4",
+            "vmovups zmmword ptr [{probability} + 0], zmm4",
+            "vmovups zmm4, zmmword ptr [{probability} + 64]",
+            "vfmadd132ps zmm4, zmm6, zmm5",
+            "vaddps zmm1, zmm1, zmm4",
+            "vmovups zmmword ptr [{probability} + 64], zmm4",
+            "vmovups zmm4, zmmword ptr [{probability} + 128]",
+            "vfmadd132ps zmm4, zmm6, zmm5",
+            "vaddps zmm2, zmm2, zmm4",
+            "vmovups zmmword ptr [{probability} + 128], zmm4",
+            "vmovups zmm4, zmmword ptr [{probability} + 192]",
+            "vfmadd132ps zmm4, zmm6, zmm5",
+            "vaddps zmm3, zmm3, zmm4",
+            "vmovups zmmword ptr [{probability} + 192], zmm4",
+
+            "6:",
+            "add {probability}, 256",
+            "inc {alleles}",
+            "dec {blocks}",
+            "jnz 2b",
+            "8:",
+            "vmovups zmmword ptr [{sums} + 0], zmm0",
+            "vmovups zmmword ptr [{sums} + 64], zmm1",
+            "vmovups zmmword ptr [{sums} + 128], zmm2",
+            "vmovups zmmword ptr [{sums} + 192], zmm3",
+            "vzeroupper",
+            probability = inout(reg) probability_cursor => _,
+            alleles = inout(reg) allele_cursor => _,
+            blocks = inout(reg) blocks => _,
+            genotype_mask = in(reg) genotype_mask,
+            stay_pair = in(reg) stay_pair_ptr,
+            transferred_pair = in(reg) transferred_pair_ptr,
+            mismatch_masks = in(reg) mismatch_masks_ptr,
+            mismatch_pair = in(reg) mismatch_pair_ptr,
+            sums = in(reg) sum_lanes_ptr,
+            packed = out(reg) _,
+            code = out(reg) _,
+            out("zmm0") _,
+            out("zmm1") _,
+            out("zmm2") _,
+            out("zmm3") _,
+            out("zmm4") _,
+            out("zmm5") _,
+            out("zmm6") _,
+            out("zmm7") _,
+            out("k1") _,
+            options(nostack),
+        );
+
+        [
+            _mm256_loadu_ps(sum_lanes.as_ptr()),
+            _mm256_loadu_ps(sum_lanes.as_ptr().add(8)),
+            _mm256_loadu_ps(sum_lanes.as_ptr().add(16)),
+            _mm256_loadu_ps(sum_lanes.as_ptr().add(24)),
+            _mm256_loadu_ps(sum_lanes.as_ptr().add(32)),
+            _mm256_loadu_ps(sum_lanes.as_ptr().add(40)),
+            _mm256_loadu_ps(sum_lanes.as_ptr().add(48)),
+            _mm256_loadu_ps(sum_lanes.as_ptr().add(56)),
+        ]
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline(never)]
+    #[target_feature(enable = "avx2,fma,avx512f")]
+    unsafe fn run_full_ambiguous_blocks_avx512(
+        probability: *mut f32,
+        allele_bytes: *const u8,
+        block_count: usize,
+        stay: __m256,
+        transferred: __m256,
+        ambiguous_code: u8,
+        mismatch: f32,
+    ) -> [__m256; HAPLOTYPES] {
+        let mut stay_pair = [0.0f32; 2 * HAPLOTYPES];
+        let mut transferred_pair = [0.0f32; 2 * HAPLOTYPES];
+        _mm256_storeu_ps(stay_pair.as_mut_ptr(), stay);
+        _mm256_storeu_ps(stay_pair.as_mut_ptr().add(HAPLOTYPES), stay);
+        _mm256_storeu_ps(transferred_pair.as_mut_ptr(), transferred);
+        _mm256_storeu_ps(transferred_pair.as_mut_ptr().add(HAPLOTYPES), transferred);
+
+        let zero_mask = u16::from(ambiguous_code);
+        let one_mask = u16::from(!ambiguous_code);
+        let mismatch_masks = [
+            zero_mask | (zero_mask << 8),
+            zero_mask | (one_mask << 8),
+            one_mask | (zero_mask << 8),
+            one_mask | (one_mask << 8),
+        ];
+        let mismatch_pair = [mismatch; 2 * HAPLOTYPES];
+
+        let probability_cursor = probability;
+        let allele_cursor = allele_bytes;
+        let blocks = block_count;
+        let stay_pair_ptr = stay_pair.as_ptr();
+        let transferred_pair_ptr = transferred_pair.as_ptr();
+        let mismatch_masks_ptr = mismatch_masks.as_ptr();
+        let mismatch_pair_ptr = mismatch_pair.as_ptr();
+        let mut sum_lanes = [0.0f32; HAPLOTYPES * HAPLOTYPES];
+        let sum_lanes_ptr = sum_lanes.as_mut_ptr();
+
+        asm!(
+            "vmovups zmm5, zmmword ptr [{stay_pair}]",
+            "vmovups zmm6, zmmword ptr [{transferred_pair}]",
+            "vmovups zmm7, zmmword ptr [{mismatch_pair}]",
+            "vpxord zmm0, zmm0, zmm0",
+            "vpxord zmm1, zmm1, zmm1",
+            "vpxord zmm2, zmm2, zmm2",
+            "vpxord zmm3, zmm3, zmm3",
+            "test {blocks}, {blocks}",
+            "jz 4f",
+            "2:",
+            "movzx {packed:e}, byte ptr [{alleles}]",
+
+            "mov {code}, {packed}",
+            "shr {code}, 6",
+            "and {code}, 3",
+            "movzx {code:e}, word ptr [{mismatch_masks} + {code}*2]",
+            "kmovw k1, {code:e}",
+            "vmovups zmm4, zmmword ptr [{probability} + 0]",
+            "vfmadd132ps zmm4, zmm6, zmm5",
+            "vmulps zmm4 {{k1}}, zmm4, zmm7",
+            "vaddps zmm0, zmm0, zmm4",
+            "vmovups zmmword ptr [{probability} + 0], zmm4",
+
+            "mov {code}, {packed}",
+            "shr {code}, 4",
+            "and {code}, 3",
+            "movzx {code:e}, word ptr [{mismatch_masks} + {code}*2]",
+            "kmovw k1, {code:e}",
+            "vmovups zmm4, zmmword ptr [{probability} + 64]",
+            "vfmadd132ps zmm4, zmm6, zmm5",
+            "vmulps zmm4 {{k1}}, zmm4, zmm7",
+            "vaddps zmm1, zmm1, zmm4",
+            "vmovups zmmword ptr [{probability} + 64], zmm4",
+
+            "mov {code}, {packed}",
+            "shr {code}, 2",
+            "and {code}, 3",
+            "movzx {code:e}, word ptr [{mismatch_masks} + {code}*2]",
+            "kmovw k1, {code:e}",
+            "vmovups zmm4, zmmword ptr [{probability} + 128]",
+            "vfmadd132ps zmm4, zmm6, zmm5",
+            "vmulps zmm4 {{k1}}, zmm4, zmm7",
+            "vaddps zmm2, zmm2, zmm4",
+            "vmovups zmmword ptr [{probability} + 128], zmm4",
+
+            "mov {code}, {packed}",
+            "and {code}, 3",
+            "movzx {code:e}, word ptr [{mismatch_masks} + {code}*2]",
+            "kmovw k1, {code:e}",
+            "vmovups zmm4, zmmword ptr [{probability} + 192]",
+            "vfmadd132ps zmm4, zmm6, zmm5",
+            "vmulps zmm4 {{k1}}, zmm4, zmm7",
+            "vaddps zmm3, zmm3, zmm4",
+            "vmovups zmmword ptr [{probability} + 192], zmm4",
+
+            "add {probability}, 256",
+            "inc {alleles}",
+            "dec {blocks}",
+            "jnz 2b",
+            "4:",
+            "vmovups zmmword ptr [{sums} + 0], zmm0",
+            "vmovups zmmword ptr [{sums} + 64], zmm1",
+            "vmovups zmmword ptr [{sums} + 128], zmm2",
+            "vmovups zmmword ptr [{sums} + 192], zmm3",
+            "vzeroupper",
+            probability = inout(reg) probability_cursor => _,
+            alleles = inout(reg) allele_cursor => _,
+            blocks = inout(reg) blocks => _,
+            stay_pair = in(reg) stay_pair_ptr,
+            transferred_pair = in(reg) transferred_pair_ptr,
+            mismatch_masks = in(reg) mismatch_masks_ptr,
+            mismatch_pair = in(reg) mismatch_pair_ptr,
+            sums = in(reg) sum_lanes_ptr,
+            packed = out(reg) _,
+            code = out(reg) _,
+            out("zmm0") _,
+            out("zmm1") _,
+            out("zmm2") _,
+            out("zmm3") _,
+            out("zmm4") _,
+            out("zmm5") _,
+            out("zmm6") _,
+            out("zmm7") _,
+            out("k1") _,
+            options(nostack),
+        );
+
+        [
+            _mm256_loadu_ps(sum_lanes.as_ptr()),
+            _mm256_loadu_ps(sum_lanes.as_ptr().add(8)),
+            _mm256_loadu_ps(sum_lanes.as_ptr().add(16)),
+            _mm256_loadu_ps(sum_lanes.as_ptr().add(24)),
+            _mm256_loadu_ps(sum_lanes.as_ptr().add(32)),
+            _mm256_loadu_ps(sum_lanes.as_ptr().add(40)),
+            _mm256_loadu_ps(sum_lanes.as_ptr().add(48)),
+            _mm256_loadu_ps(sum_lanes.as_ptr().add(56)),
+        ]
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -2354,6 +2732,8 @@ unsafe fn run_segment_single_v1_impl(
         effective_population_size: parameters.effective_population_size,
         total_haplotypes: parameters.total_haplotypes,
         mismatch: parameters.emission_mismatch / parameters.emission_match,
+        #[cfg(target_arch = "x86_64")]
+        avx512: avx512_full_kernel_available(),
         segment_first: validated.segment_first,
         segment_last: validated.segment_last,
         locus_first: validated.locus_first,
@@ -2427,6 +2807,140 @@ pub unsafe extern "C" fn shapeit_hmm_run_segment_single_prevalidated_v1(
 mod tests {
     use super::*;
     use core::ptr;
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx512_full_kernel_model_allowlist_is_narrow() {
+        assert_eq!(intel_family_model(0x0008_06f0), (6, 0x8f));
+        assert_eq!(intel_family_model(0x000c_06f0), (6, 0xcf));
+        assert!(intel_avx512_full_model_allowed(0x0008_06f0));
+        assert!(intel_avx512_full_model_allowed(0x000c_06f0));
+        assert!(!intel_avx512_full_model_allowed(0x0005_0650));
+        assert!(!intel_avx512_full_model_allowed(0x0006_06a0));
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe fn assert_vector_sums_bitwise_equal(
+        left: [__m256; HAPLOTYPES],
+        right: [__m256; HAPLOTYPES],
+    ) {
+        let mut left_lanes = [0.0f32; HAPLOTYPES * HAPLOTYPES];
+        let mut right_lanes = [0.0f32; HAPLOTYPES * HAPLOTYPES];
+        for vector in 0..HAPLOTYPES {
+            _mm256_storeu_ps(
+                left_lanes.as_mut_ptr().add(vector * HAPLOTYPES),
+                left[vector],
+            );
+            _mm256_storeu_ps(
+                right_lanes.as_mut_ptr().add(vector * HAPLOTYPES),
+                right[vector],
+            );
+        }
+        assert_eq!(left_lanes.map(f32::to_bits), right_lanes.map(f32::to_bits));
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx512_full_blocks_are_bitwise_identical_to_avx2() {
+        if !std::arch::is_x86_feature_detected!("avx512f") {
+            return;
+        }
+        const BLOCKS: usize = 5;
+        let alleles = [0x00u8, 0xff, 0x96, 0x01, 0x80];
+        let probability: Vec<f32> = (0..BLOCKS * HAPLOTYPES * HAPLOTYPES)
+            .map(|index| (index as f32 + 1.0) * 0.000_031_25)
+            .collect();
+        let stay = unsafe { _mm256_set1_ps(0.9375) };
+        let transferred = unsafe {
+            _mm256_setr_ps(
+                0.0001, 0.0002, 0.0003, 0.0004, 0.0005, 0.0006, 0.0007, 0.0008,
+            )
+        };
+        let mismatch_scalar = 0.000_100_01f32;
+        let mismatch = unsafe { _mm256_set1_ps(mismatch_scalar) };
+
+        for genotype_allele in [false, true] {
+            let mut avx2_probability = probability.clone();
+            let mut avx512_probability = probability.clone();
+            let avx2_sums = unsafe {
+                SingleEngine::run_full_hom_blocks_avx2(
+                    avx2_probability.as_mut_ptr(),
+                    alleles.as_ptr(),
+                    BLOCKS,
+                    stay,
+                    transferred,
+                    mismatch,
+                    genotype_allele,
+                )
+            };
+            let avx512_sums = unsafe {
+                SingleEngine::run_full_hom_blocks_avx512(
+                    avx512_probability.as_mut_ptr(),
+                    alleles.as_ptr(),
+                    BLOCKS,
+                    stay,
+                    transferred,
+                    mismatch_scalar,
+                    genotype_allele,
+                )
+            };
+            assert_eq!(
+                avx2_probability
+                    .iter()
+                    .copied()
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>(),
+                avx512_probability
+                    .iter()
+                    .copied()
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>()
+            );
+            unsafe { assert_vector_sums_bitwise_equal(avx2_sums, avx512_sums) };
+        }
+
+        let emission_zero =
+            unsafe { _mm256_setr_ps(1.0, 0.0001, 1.0, 0.0001, 1.0, 0.0001, 1.0, 0.0001) };
+        let emission_one =
+            unsafe { _mm256_setr_ps(0.0001, 1.0, 0.0001, 1.0, 0.0001, 1.0, 0.0001, 1.0) };
+        let mut avx2_probability = probability.clone();
+        let mut avx512_probability = probability;
+        let avx2_sums = unsafe {
+            SingleEngine::run_full_ambiguous_blocks_avx2(
+                avx2_probability.as_mut_ptr(),
+                alleles.as_ptr(),
+                BLOCKS,
+                stay,
+                transferred,
+                emission_zero,
+                emission_one,
+            )
+        };
+        let avx512_sums = unsafe {
+            SingleEngine::run_full_ambiguous_blocks_avx512(
+                avx512_probability.as_mut_ptr(),
+                alleles.as_ptr(),
+                BLOCKS,
+                stay,
+                transferred,
+                0xaa,
+                0.0001,
+            )
+        };
+        assert_eq!(
+            avx2_probability
+                .iter()
+                .copied()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>(),
+            avx512_probability
+                .iter()
+                .copied()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>()
+        );
+        unsafe { assert_vector_sums_bitwise_equal(avx2_sums, avx512_sums) };
+    }
 
     #[test]
     fn single_precision_locus_normalizes_first_diplotypes() {

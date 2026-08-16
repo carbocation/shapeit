@@ -40,8 +40,12 @@ remains available to other ABI callers.
 The portable implementation is used on non-x86 targets. SHAPEIT's existing
 x86-64 build contract requires AVX2 and FMA; the Rust build uses the same
 features. The single-precision implementation preserves the existing AVX2/FMA
-arithmetic and reduction order. The C++ adapters make one Rust call per HMM
-window rather than crossing the ABI within a locus loop.
+arithmetic and reduction order. Full eight-lane state blocks use a bitwise-
+equivalent paired-ZMM implementation on measured Intel Sapphire Rapids and
+Emerald Rapids CPUs. Runtime CPUID dispatch deliberately keeps AVX2 on
+Cascade Lake, Ice Lake, other vendors, and unmeasured Intel models; new models
+must be benchmarked before being added to the allowlist. The C++ adapters make
+one Rust call per HMM window rather than crossing the ABI within a locus loop.
 
 ## Genotype graph construction and sampling
 
