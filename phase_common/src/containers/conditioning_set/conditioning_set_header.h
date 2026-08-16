@@ -48,10 +48,6 @@ public:
 
 	//STATE DATA
 	std::vector < int > indexes_pbwt_neighbour;
-	std::vector < size_t > ibd_offsets;
-	std::vector < int32_t > ibd_individuals;
-	std::vector < int32_t > ibd_from;
-	std::vector < int32_t > ibd_to;
 
 	//SOLVER DATA
 	std::vector < float > scoreBit;

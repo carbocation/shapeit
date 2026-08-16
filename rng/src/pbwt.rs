@@ -1,6 +1,7 @@
 use core::slice;
 
 use crate::genotype::LogicalRng;
+use crate::ibd2::Ibd2TracksV1;
 
 const ABI_VERSION: u32 = 1;
 const STATUS_OK: u32 = 0;
@@ -130,10 +131,7 @@ struct SelectValidation<'a> {
     chunk: usize,
     buffer_start: usize,
     depth: usize,
-    ibd_offsets: &'a [usize],
-    ibd_individuals: &'a [i32],
-    ibd_from: &'a [i32],
-    ibd_to: &'a [i32],
+    ibd2: &'a Ibd2TracksV1,
     neighbors_length: usize,
 }
 
@@ -152,15 +150,9 @@ fn validate_select_layout(parameters: SelectValidation<'_>) -> Result<SelectLayo
         chunk,
         buffer_start,
         depth,
-        ibd_offsets,
-        ibd_individuals,
-        ibd_from,
-        ibd_to,
+        ibd2,
         neighbors_length,
     } = parameters;
-    let expected_ibd_offsets = target_individual_count
-        .checked_add(1)
-        .ok_or(STATUS_INTEGER_OVERFLOW)?;
     if site_count == 0
         || haplotype_count == 0
         || target_individual_count == 0
@@ -171,9 +163,8 @@ fn validate_select_layout(parameters: SelectValidation<'_>) -> Result<SelectLayo
         || selected_sites.len() != site_count
         || site_groups.len() != site_count
         || site_chunks.len() != site_count
-        || ibd_offsets.len() != expected_ibd_offsets
-        || ibd_individuals.len() != ibd_from.len()
-        || ibd_individuals.len() != ibd_to.len()
+        || ibd2.individual_count() != target_individual_count
+        || !ibd2.is_collapsed()
         || buffer_start >= site_count
     {
         return Err(STATUS_INVALID_DIMENSIONS);
@@ -226,38 +217,6 @@ fn validate_select_layout(parameters: SelectValidation<'_>) -> Result<SelectLayo
         return Err(STATUS_INVALID_DIMENSIONS);
     }
 
-    if ibd_offsets.first().copied() != Some(0)
-        || ibd_offsets.last().copied() != Some(ibd_individuals.len())
-    {
-        return Err(STATUS_INVALID_DIMENSIONS);
-    }
-    for source in 0..target_individual_count {
-        let start = ibd_offsets[source];
-        let stop = ibd_offsets[source + 1];
-        if start > stop || stop > ibd_individuals.len() {
-            return Err(STATUS_OUT_OF_BOUNDS);
-        }
-        let mut previous_individual = -1i32;
-        let mut previous_from = -1i32;
-        for track in start..stop {
-            let individual = ibd_individuals[track];
-            let from = ibd_from[track];
-            let to = ibd_to[track];
-            if individual < source as i32
-                || individual >= target_individual_count as i32
-                || from < 0
-                || from > to
-                || to as usize >= site_count
-                || individual < previous_individual
-                || (individual == previous_individual && from < previous_from)
-            {
-                return Err(STATUS_INVALID_DIMENSIONS);
-            }
-            previous_individual = individual;
-            previous_from = from;
-        }
-    }
-
     let neighbor_slab = group_count
         .checked_mul(target_haplotype_count)
         .ok_or(STATUS_INTEGER_OVERFLOW)?;
@@ -273,39 +232,6 @@ fn validate_select_layout(parameters: SelectValidation<'_>) -> Result<SelectLayo
         last_current,
         neighbor_slab,
     })
-}
-
-struct IbdTracks<'a> {
-    offsets: &'a [usize],
-    individuals: &'a [i32],
-    from: &'a [i32],
-    to: &'a [i32],
-}
-
-impl IbdTracks<'_> {
-    #[inline]
-    fn allows(&self, haplotype0: usize, haplotype1: usize, locus: usize) -> bool {
-        let individual0 = haplotype0 / 2;
-        let individual1 = haplotype1 / 2;
-        let source = core::cmp::min(individual0, individual1);
-        let target = core::cmp::max(individual0, individual1);
-        if source == target {
-            return false;
-        }
-        for track in self.offsets[source]..self.offsets[source + 1] {
-            let tracked_individual = self.individuals[track] as usize;
-            if tracked_individual > target {
-                break;
-            }
-            if tracked_individual == target
-                && self.from[track] as usize <= locus
-                && locus <= self.to[track] as usize
-            {
-                return false;
-            }
-        }
-        true
-    }
 }
 
 #[inline]
@@ -345,7 +271,7 @@ struct SelectParameters<'a> {
     buffer_start: usize,
     last_current: usize,
     depth: usize,
-    ibd: IbdTracks<'a>,
+    ibd2: &'a Ibd2TracksV1,
     neighbors: *mut i32,
     neighbor_slab: usize,
 }
@@ -364,7 +290,7 @@ unsafe fn select_chunk(parameters: SelectParameters<'_>) -> Result<(), u32> {
         buffer_start,
         last_current,
         depth,
-        ibd,
+        ibd2,
         neighbors,
         neighbor_slab,
     } = parameters;
@@ -434,9 +360,9 @@ unsafe fn select_chunk(parameters: SelectParameters<'_>) -> Result<(), u32> {
                         (ordering[value], right_divergence.unwrap())
                     });
                 let allowed_left =
-                    left.filter(|&(candidate, _)| ibd.allows(target_haplotype, candidate, locus));
+                    left.filter(|&(candidate, _)| ibd2.allows(target_haplotype, candidate, locus));
                 let allowed_right =
-                    right.filter(|&(candidate, _)| ibd.allows(target_haplotype, candidate, locus));
+                    right.filter(|&(candidate, _)| ibd2.allows(target_haplotype, candidate, locus));
 
                 let candidate = match (allowed_left, allowed_right) {
                     (Some(left), Some(right)) => {
@@ -955,12 +881,7 @@ pub unsafe extern "C" fn shapeit_pbwt_select_chunk_v1(
     chunk: usize,
     buffer_start: usize,
     depth: usize,
-    ibd_offsets: *const usize,
-    ibd_offsets_length: usize,
-    ibd_individuals: *const i32,
-    ibd_from: *const i32,
-    ibd_to: *const i32,
-    ibd_track_count: usize,
+    ibd2: *const Ibd2TracksV1,
     neighbors: *mut i32,
     neighbors_length: usize,
 ) -> u32 {
@@ -969,10 +890,8 @@ pub unsafe extern "C" fn shapeit_pbwt_select_chunk_v1(
         || selected_sites.is_null()
         || site_groups.is_null()
         || site_chunks.is_null()
-        || ibd_offsets.is_null()
+        || ibd2.is_null()
         || neighbors.is_null()
-        || (ibd_track_count != 0
-            && (ibd_individuals.is_null() || ibd_from.is_null() || ibd_to.is_null()))
     {
         return STATUS_NULL_POINTER;
     }
@@ -980,22 +899,7 @@ pub unsafe extern "C" fn shapeit_pbwt_select_chunk_v1(
     let selected_sites = slice::from_raw_parts(selected_sites, selected_sites_length);
     let site_groups = slice::from_raw_parts(site_groups, site_groups_length);
     let site_chunks = slice::from_raw_parts(site_chunks, site_chunks_length);
-    let ibd_offsets = slice::from_raw_parts(ibd_offsets, ibd_offsets_length);
-    let ibd_individuals = if ibd_track_count == 0 {
-        &[]
-    } else {
-        slice::from_raw_parts(ibd_individuals, ibd_track_count)
-    };
-    let ibd_from = if ibd_track_count == 0 {
-        &[]
-    } else {
-        slice::from_raw_parts(ibd_from, ibd_track_count)
-    };
-    let ibd_to = if ibd_track_count == 0 {
-        &[]
-    } else {
-        slice::from_raw_parts(ibd_to, ibd_track_count)
-    };
+    let ibd2 = &*ibd2;
     let layout = match validate_select_layout(SelectValidation {
         haplotypes_length,
         haplotype_stride,
@@ -1010,10 +914,7 @@ pub unsafe extern "C" fn shapeit_pbwt_select_chunk_v1(
         chunk,
         buffer_start,
         depth,
-        ibd_offsets,
-        ibd_individuals,
-        ibd_from,
-        ibd_to,
+        ibd2,
         neighbors_length,
     }) {
         Ok(value) => value,
@@ -1032,12 +933,7 @@ pub unsafe extern "C" fn shapeit_pbwt_select_chunk_v1(
         buffer_start,
         last_current: layout.last_current,
         depth,
-        ibd: IbdTracks {
-            offsets: ibd_offsets,
-            individuals: ibd_individuals,
-            from: ibd_from,
-            to: ibd_to,
-        },
+        ibd2,
         neighbors,
         neighbor_slab: layout.neighbor_slab,
     });
@@ -1140,7 +1036,7 @@ mod tests {
         let selected = [1u8, 1];
         let groups = [0i32, 1];
         let chunks = [0i32, 0];
-        let ibd_offsets = [0usize, 0, 0];
+        let ibd2 = Ibd2TracksV1::new(2, &[0.0, 1.0]).unwrap();
         let mut neighbors = [-1i32; 16];
         let status = unsafe {
             select_chunk(SelectParameters {
@@ -1156,12 +1052,7 @@ mod tests {
                 buffer_start: 0,
                 last_current: 1,
                 depth: 1,
-                ibd: IbdTracks {
-                    offsets: &ibd_offsets,
-                    individuals: &[],
-                    from: &[],
-                    to: &[],
-                },
+                ibd2: &ibd2,
                 neighbors: neighbors.as_mut_ptr(),
                 neighbor_slab: 8,
             })

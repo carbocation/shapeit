@@ -51,7 +51,7 @@ public:
 	window_set Windows;
 
 	//States
-	std::vector < track > Kbanned;
+	std::vector < shapeit_ibd2_track_v1 > Kbanned;
 	std::vector < std::span < const uint32_t > > Kstates;
 	shapeit_conditioning_job_v1 * Conditioning;
 	std::vector < uint8_t > Haploid;

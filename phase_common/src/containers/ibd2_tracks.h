@@ -24,53 +24,21 @@
 #define _IBD2_TRACKS_H
 
 #include <utils/otools.h>
+#include <shapeit_ibd2.h>
 
 #include <containers/variant_map.h>
 
-struct track {
-	int ind, from, to;
-
-	track(int _ind, int _from, int _to) {
-		ind = _ind;
-		from = _from;
-		to = _to;
-	}
-
-	bool operator<(const track & rhs) const {
-		if (ind < rhs.ind) return true;
-		if (ind > rhs.ind) return false;
-		return (from < rhs.from);
-	}
-
-	bool overlap (const track & rhs) const {
-		return ((ind==rhs.ind) && (rhs.to >= from) && (rhs.from <= to));
-	}
-
-	bool merge (const track & rhs) {
-		bool inclusive0 = (from <= rhs.from) && (to >= rhs.to);
-		bool inclusive1 = (rhs.from <= from) && (rhs.to >= to);
-		from = std::min(from, rhs.from);
-		to = std::max(to, rhs.to);
-		return (!inclusive0 && !inclusive1);
-	}
-};
-
 class ibd2_tracks {
 public:
-
-	std::vector < float > vec_cm;
-	std::vector < std::vector < track > > IBD2;
+	shapeit_ibd2_tracks_v1 * Handle;
 
 	ibd2_tracks ();
 	~ibd2_tracks ();
+	ibd2_tracks(const ibd2_tracks &) = delete;
+	ibd2_tracks & operator=(const ibd2_tracks &) = delete;
 	void clear();
 	void initialize(int, variant_map &);
-
-	bool noIBD2(int, int, int);
-	void pushIBD2(int, std::vector < track > &);
-
-	void expand(std::vector < track > &);
-	int collapse(std::vector < track > &);
+	void pushIBD2(int, const std::vector < shapeit_ibd2_track_v1 > &);
 	void collapse();
 };
 

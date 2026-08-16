@@ -22,10 +22,13 @@
 
 #include <containers/ibd2_tracks.h>
 
+#include <cstdint>
+#include <stdexcept>
+
 using namespace std;
 
 ibd2_tracks::ibd2_tracks () {
-	clear();
+	Handle = nullptr;
 }
 
 ibd2_tracks::~ibd2_tracks() {
@@ -33,70 +36,45 @@ ibd2_tracks::~ibd2_tracks() {
 }
 
 void ibd2_tracks::clear() {
-	IBD2.clear();
+	if (Handle != nullptr) {
+		shapeit_ibd2_tracks_free_v1(Handle);
+		Handle = nullptr;
+	}
 }
 
 void ibd2_tracks::initialize(int n_ind, variant_map & V) {
-	IBD2 = vector < vector < track > > (n_ind);
-	vec_cm = vector < float > (V.size(), 0.0f);
-	for (int l = 0 ; l < vec_cm.size() ; l ++) vec_cm[l] = V.vec_pos[l]->cm;
-}
-
-void ibd2_tracks::pushIBD2(int ind, vector < track > & T) {
-	expand(T);
-	for (int t = 0 ; t < T.size() ; t ++)
-		IBD2[min(ind, T[t].ind)].emplace_back(max(ind, T[t].ind), T[t].from, T[t].to);
-}
-
-void ibd2_tracks::expand(vector < track > & IBD) {
-	unsigned n_merge = 0;
-	for (int t = 0 ; t < IBD.size() ; t ++) {
-
-		//Expand left by 4cm
-		float leftcm = vec_cm[IBD[t].from];
-		while (IBD[t].from > 1 && (leftcm - vec_cm[IBD[t].from]) < 4.0f) IBD[t].from --;
-
-		//Expand right by 4cm
-		float rightcm = vec_cm[IBD[t].to];
-		while (IBD[t].to < (vec_cm.size()-1) && (vec_cm[IBD[t].to] - rightcm) < 4.0f) IBD[t].to ++;
-
+	clear();
+	vector < float > centimorgans(V.size(), 0.0f);
+	for (int l = 0 ; l < centimorgans.size() ; l ++) centimorgans[l] = V.vec_pos[l]->cm;
+	const uint32_t status = shapeit_ibd2_tracks_create_v1(
+		n_ind, centimorgans.data(), centimorgans.size(), &Handle);
+	if (status != SHAPEIT_IBD2_STATUS_OK) {
+		throw runtime_error("Rust IBD2 registry rejected initialization (status " +
+			to_string(status) + ")");
 	}
 }
 
-int ibd2_tracks::collapse(vector < track > & IBD) {
-	unsigned n_merge = 0;
-	if (IBD.size() > 1) {
-		for(vector < track > :: iterator it = IBD.begin() + 1 ; it != IBD.end() ; ) {
-			if (it->overlap(*(it-1))) {
-				n_merge += (it-1)->merge(*it);
-				it = IBD.erase(it);
-			} else ++it;
-		}
+void ibd2_tracks::pushIBD2(int ind, const vector < shapeit_ibd2_track_v1 > & tracks) {
+	const uint32_t status = shapeit_ibd2_tracks_push_v1(
+		Handle, ind, tracks.data(), tracks.size());
+	if (status != SHAPEIT_IBD2_STATUS_OK) {
+		throw runtime_error("Rust IBD2 registry rejected detected tracks (status " +
+			to_string(status) + ")");
 	}
-	return n_merge;
 }
 
 void ibd2_tracks::collapse() {
 	tac.clock();
-	unsigned int n_inds1 = 0, n_tracks1 = 0, n_merged1 = 0, n_inds2 = 0, n_tracks2 = 0, n_merged2 = 0;
-	for (int i = 0 ; i < IBD2.size() ; i ++) {
-		sort(IBD2[i].begin(), IBD2[i].end());
-		n_merged2 += collapse(IBD2[i]);
-		n_tracks2 += IBD2[i].size();
-		n_inds2 += (IBD2[i].size() > 0);
+	shapeit_ibd2_stats_v1 stats = {};
+	const uint32_t status = shapeit_ibd2_tracks_collapse_v1(Handle, &stats);
+	if (status != SHAPEIT_IBD2_STATUS_OK) {
+		throw runtime_error("Rust IBD2 registry failed to collapse tracks (status " +
+			to_string(status) + ")");
 	}
-	vrb.bullet("IBD2 tracks [#inds=" + stb.str(n_inds2) + " / #tracks=" + stb.str(n_tracks2) + " / #merged = " + stb.str(n_merged2) + "]");
+	vrb.bullet("IBD2 tracks [#inds=" + stb.str(stats.individuals) +
+		" / #tracks=" + stb.str(stats.tracks) + " / #merged = " +
+		stb.str(stats.merged) + "]");
 }
-
-bool ibd2_tracks::noIBD2(int hap0, int hap1, int locus) {
-	int src_ind = min(hap0/2, hap1/2);
-	int tar_ind = max(hap0/2, hap1/2);
-	if (src_ind == tar_ind) return false;
-	for (int i = 0 ; i < IBD2[src_ind].size() && IBD2[src_ind][i].ind <= tar_ind ; i ++)
-		if ((IBD2[src_ind][i].ind == tar_ind) && (IBD2[src_ind][i].from <= locus) && (locus <= IBD2[src_ind][i].to)) return false;
-	return true;
-}
-
 
 
 

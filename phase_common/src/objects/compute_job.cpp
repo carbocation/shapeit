@@ -172,6 +172,6 @@ void compute_job::make(unsigned int ind, double min_window_size, random_number_g
 	}
 	Kbanned.reserve(tracks_length);
 	for (size_t t = 0 ; t < tracks_length ; t ++) {
-		Kbanned.emplace_back(tracks[t].individual, tracks[t].from, tracks[t].to);
+		Kbanned.push_back({tracks[t].individual, tracks[t].from, tracks[t].to});
 	}
 }

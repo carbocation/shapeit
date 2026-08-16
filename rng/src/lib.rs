@@ -2,6 +2,7 @@ mod bitmatrix;
 mod conditioning;
 mod genotype;
 mod hmm;
+mod ibd2;
 mod pbwt;
 
 const ABI_VERSION: u32 = 1;

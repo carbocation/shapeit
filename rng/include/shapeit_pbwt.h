@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <shapeit_ibd2.h>
+
 #define SHAPEIT_PBWT_ABI_VERSION 1U
 
 #define SHAPEIT_PBWT_STATUS_OK 0U
@@ -68,12 +70,7 @@ uint32_t shapeit_pbwt_select_chunk_v1(
     size_t chunk,
     size_t buffer_start,
     size_t depth,
-    const size_t * ibd_offsets,
-    size_t ibd_offsets_length,
-    const int32_t * ibd_individuals,
-    const int32_t * ibd_from,
-    const int32_t * ibd_to,
-    size_t ibd_track_count,
+    const shapeit_ibd2_tracks_v1 * ibd2,
     int32_t * neighbors,
     size_t neighbors_length);
 

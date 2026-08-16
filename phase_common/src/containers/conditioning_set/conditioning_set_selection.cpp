@@ -74,8 +74,7 @@ void conditioning_set::select(int chunk) {
 		sites_pbwt_grouping.size(), sites_pbwt_ngroups,
 		reinterpret_cast<const int32_t *>(sites_pbwt_mthreading.data()),
 		sites_pbwt_mthreading.size(), chunk, starts_pbwt_mthreading[chunk], depth,
-		ibd_offsets.data(), ibd_offsets.size(), ibd_individuals.data(),
-		ibd_from.data(), ibd_to.data(), ibd_individuals.size(),
+		Kbanned.Handle,
 		reinterpret_cast<int32_t *>(indexes_pbwt_neighbour.data()),
 		indexes_pbwt_neighbour.size());
 	if (status == SHAPEIT_PBWT_STATUS_INSUFFICIENT_STATES) {
@@ -106,18 +105,6 @@ void conditioning_set::select(uint32_t iteration) {
 
 	//Clean up previous selected states
 	fill(indexes_pbwt_neighbour.begin(), indexes_pbwt_neighbour.end() , -1);
-	ibd_offsets.assign(n_ind + 1, 0);
-	ibd_individuals.clear();
-	ibd_from.clear();
-	ibd_to.clear();
-	for (int source = 0 ; source < n_ind ; source ++) {
-		for (const track & value : Kbanned.IBD2[source]) {
-			ibd_individuals.push_back(value.ind);
-			ibd_from.push_back(value.from);
-			ibd_to.push_back(value.to);
-		}
-		ibd_offsets[source + 1] = ibd_individuals.size();
-	}
 
 	//Perform multi-threaded selection
 	vrb.progress("  * PBWT selection", 0.0f);
@@ -131,10 +118,6 @@ void conditioning_set::select(uint32_t iteration) {
 
 	//Transpose matrix with selected states
 	transposePBWTneighbours();
-	ibd_offsets.clear();
-	ibd_individuals.clear();
-	ibd_from.clear();
-	ibd_to.clear();
 
 	vrb.bullet("PBWT selection (" + stb.str(tac.rel_time()*1.0/1000, 2) + "s)");
 }

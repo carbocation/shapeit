@@ -43,10 +43,6 @@ conditioning_set::~conditioning_set() {
 	sites_pbwt_selection.clear();
 	sites_pbwt_grouping.clear();
 	indexes_pbwt_neighbour.clear();
-	ibd_offsets.clear();
-	ibd_individuals.clear();
-	ibd_from.clear();
-	ibd_to.clear();
 }
 
 

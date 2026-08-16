@@ -82,6 +82,13 @@ opaque Rust job retains the nested state vectors; C++ borrows immutable spans
 for the HMM and never copies or reallocates them. Each worker rebuilds the same
 opaque job in place so its scratch storage and vector capacities are reused.
 
+## IBD2 registry
+
+The opaque `shapeit_ibd2_tracks_v1` registry owns accumulated common-phasing
+IBD2 exclusions. Rust expands new tracks by the established 4 cM rule, sorts
+and collapses overlapping intervals, and exposes the live registry directly to
+PBWT neighbour selection. C++ no longer stores or flattens nested track vectors.
+
 ## PBWT initialization sweep
 
 `shapeit_pbwt_solve_chunk_v1` owns one complete PBWT initialization chunk,
