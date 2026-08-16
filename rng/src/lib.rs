@@ -1,4 +1,5 @@
 mod bitmatrix;
+mod genotype;
 mod hmm;
 
 const ABI_VERSION: u32 = 1;

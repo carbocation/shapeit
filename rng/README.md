@@ -40,8 +40,16 @@ remains available to other ABI callers.
 The portable implementation is used on non-x86 targets. SHAPEIT's existing
 x86-64 build contract requires AVX2 and FMA; the Rust build uses the same
 features. The single-precision implementation preserves the existing AVX2/FMA
-arithmetic and reduction order. The C++ adapters make one
-Rust call per HMM window rather than crossing the ABI within a locus loop.
+arithmetic and reduction order. The C++ adapters make one Rust call per HMM
+window rather than crossing the ABI within a locus loop.
+
+## Genotype graph construction
+
+`shapeit_genotype_graph_sizes_v1` and `shapeit_genotype_graph_build_v1` own the
+per-sample common-phasing graph builder. They preserve segment splitting,
+scaffold ordering, 8-lane ambiguity codes, diplotype masks, missing counts, and
+transition counts while reducing repeated scans of the packed variants. Output
+storage remains caller-owned.
 
 ## Random-number generation
 
