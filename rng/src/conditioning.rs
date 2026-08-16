@@ -2,9 +2,11 @@ use core::{mem, slice};
 
 use crate::bitmatrix::heterozygote_overlap;
 use crate::genotype::{
-    build_windows, GenotypeWindowV1, LogicalRng, WindowInputs, STATUS_INTEGER_OVERFLOW,
-    STATUS_INVALID_DIMENSIONS, STATUS_NULL_POINTER, STATUS_OK, STATUS_OUT_OF_BOUNDS,
+    build_windows, GenotypeGraphV1, GenotypeWindowV1, LogicalRng, WindowInputs,
+    STATUS_INTEGER_OVERFLOW, STATUS_INVALID_DIMENSIONS, STATUS_NULL_POINTER, STATUS_OK,
+    STATUS_OUT_OF_BOUNDS,
 };
+use crate::ibd2::{shapeit_ibd2_tracks_push_v1, Ibd2TrackV1, Ibd2TracksV1};
 
 const ABI_VERSION: u32 = 1;
 const STATUS_INSUFFICIENT_STATES: u32 = 5;
@@ -59,12 +61,42 @@ pub struct ConditioningBuildV1 {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ConditioningTrackV1 {
-    individual: i32,
-    from: i32,
-    to: i32,
+#[derive(Clone, Copy)]
+pub struct ConditioningGraphBuildV1 {
+    pub(crate) abi_version: u32,
+    pub(crate) struct_size: usize,
+    pub(crate) graph: *const GenotypeGraphV1,
+    pub(crate) centimorgans: *const f64,
+    pub(crate) centimorgans_length: usize,
+    pub(crate) minimum_window_centimorgans: f32,
+    pub(crate) selected_sites: *const u8,
+    pub(crate) selected_sites_length: usize,
+    pub(crate) site_grouping: *const i32,
+    pub(crate) site_grouping_length: usize,
+    pub(crate) pbwt_neighbors: *const i32,
+    pub(crate) pbwt_neighbors_length: usize,
+    pub(crate) pbwt_depth: usize,
+    pub(crate) pbwt_group_count: usize,
+    pub(crate) target_individual: usize,
+    pub(crate) target_individual_count: usize,
+    pub(crate) haplotype_count: usize,
+    pub(crate) haploid_individuals: *const u8,
+    pub(crate) haploid_individuals_length: usize,
+    pub(crate) haplotypes: *const u8,
+    pub(crate) haplotypes_length: usize,
+    pub(crate) haplotype_stride: usize,
+    pub(crate) maximum_heterozygote_mismatch: f32,
+    pub(crate) window_seed: u64,
+    pub(crate) window_domain: u32,
+    pub(crate) window_iteration: u32,
+    pub(crate) window_item: u64,
+    pub(crate) fallback_seed: u64,
+    pub(crate) fallback_domain: u32,
+    pub(crate) fallback_iteration: u32,
+    pub(crate) fallback_item: u64,
 }
+
+pub type ConditioningTrackV1 = Ibd2TrackV1;
 
 #[derive(Default)]
 pub struct ConditioningJobV1 {
@@ -82,6 +114,8 @@ pub struct ConditioningJobV1 {
     pub(crate) index_scratch: Vec<usize>,
     pub(crate) transition_probabilities: Vec<f64>,
     pub(crate) missing_probabilities: Vec<f32>,
+    segment_start_centimorgans: Vec<f64>,
+    segment_stop_centimorgans: Vec<f64>,
 }
 
 struct ConditioningInputs<'a> {
@@ -478,6 +512,130 @@ pub unsafe extern "C" fn shapeit_conditioning_job_build_v1(
 }
 
 #[no_mangle]
+/// Build a conditioning job directly from a Rust-owned genotype graph.
+///
+/// Segment boundary cM arrays are derived from the full-variant cM input and
+/// retained as worker-local Rust workspace across job rebuilds.
+///
+/// # Safety
+///
+/// `parameters` must be valid and every non-empty buffer readable for its
+/// stated length. `job` must be writable and contain null or a live job
+/// returned by a conditioning-job constructor.
+pub unsafe extern "C" fn shapeit_conditioning_graph_job_build_v1(
+    parameters: *const ConditioningGraphBuildV1,
+    job: *mut *mut ConditioningJobV1,
+) -> u32 {
+    if parameters.is_null() || job.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let parameters = &*parameters;
+    if parameters.abi_version != ABI_VERSION
+        || parameters.struct_size < mem::size_of::<ConditioningGraphBuildV1>()
+    {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    if parameters.graph.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    if let Err(status) = require_pointer(parameters.centimorgans, parameters.centimorgans_length) {
+        return status;
+    }
+    let graph = &*parameters.graph;
+    if !graph.is_built() {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    let (variant_count, _, _) = graph.hmm_dimensions();
+    if parameters.centimorgans_length < variant_count {
+        return STATUS_OUT_OF_BOUNDS;
+    }
+    let centimorgans = const_slice(parameters.centimorgans, parameters.centimorgans_length);
+    let (variants, _, segment_lengths, diplotypes) = graph.hmm_arrays();
+    let mut validated_loci = 0usize;
+    for &length in segment_lengths {
+        if length == 0 {
+            return STATUS_INVALID_DIMENSIONS;
+        }
+        validated_loci = match validated_loci.checked_add(length as usize) {
+            Some(value) => value,
+            None => return STATUS_INTEGER_OVERFLOW,
+        };
+    }
+    if validated_loci != variant_count {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+
+    let mut segment_starts = if (*job).is_null() {
+        Vec::new()
+    } else {
+        mem::take(&mut (**job).segment_start_centimorgans)
+    };
+    let mut segment_stops = if (*job).is_null() {
+        Vec::new()
+    } else {
+        mem::take(&mut (**job).segment_stop_centimorgans)
+    };
+    segment_starts.clear();
+    segment_stops.clear();
+    segment_starts.reserve(segment_lengths.len());
+    segment_stops.reserve(segment_lengths.len());
+    let mut locus = 0usize;
+    for &length in segment_lengths {
+        segment_starts.push(centimorgans[locus]);
+        locus += length as usize;
+        segment_stops.push(centimorgans[locus - 1]);
+    }
+
+    let build = ConditioningBuildV1 {
+        abi_version: parameters.abi_version,
+        struct_size: mem::size_of::<ConditioningBuildV1>(),
+        variants: variants.as_ptr(),
+        variants_length: variants.len(),
+        variant_count,
+        diplotypes: diplotypes.as_ptr(),
+        diplotypes_length: diplotypes.len(),
+        segment_lengths: segment_lengths.as_ptr(),
+        segment_lengths_length: segment_lengths.len(),
+        segment_start_centimorgans: segment_starts.as_ptr(),
+        segment_start_centimorgans_length: segment_starts.len(),
+        segment_stop_centimorgans: segment_stops.as_ptr(),
+        segment_stop_centimorgans_length: segment_stops.len(),
+        minimum_window_centimorgans: parameters.minimum_window_centimorgans,
+        selected_sites: parameters.selected_sites,
+        selected_sites_length: parameters.selected_sites_length,
+        site_grouping: parameters.site_grouping,
+        site_grouping_length: parameters.site_grouping_length,
+        pbwt_neighbors: parameters.pbwt_neighbors,
+        pbwt_neighbors_length: parameters.pbwt_neighbors_length,
+        pbwt_depth: parameters.pbwt_depth,
+        pbwt_group_count: parameters.pbwt_group_count,
+        target_individual: parameters.target_individual,
+        target_individual_count: parameters.target_individual_count,
+        haplotype_count: parameters.haplotype_count,
+        haploid_individuals: parameters.haploid_individuals,
+        haploid_individuals_length: parameters.haploid_individuals_length,
+        haplotypes: parameters.haplotypes,
+        haplotypes_length: parameters.haplotypes_length,
+        haplotype_stride: parameters.haplotype_stride,
+        maximum_heterozygote_mismatch: parameters.maximum_heterozygote_mismatch,
+        window_seed: parameters.window_seed,
+        window_domain: parameters.window_domain,
+        window_iteration: parameters.window_iteration,
+        window_item: parameters.window_item,
+        fallback_seed: parameters.fallback_seed,
+        fallback_domain: parameters.fallback_domain,
+        fallback_iteration: parameters.fallback_iteration,
+        fallback_item: parameters.fallback_item,
+    };
+    let status = shapeit_conditioning_job_build_v1(&build, job);
+    if !(*job).is_null() {
+        (**job).segment_start_centimorgans = segment_starts;
+        (**job).segment_stop_centimorgans = segment_stops;
+    }
+    status
+}
+
+#[no_mangle]
 /// Free an opaque conditioning job. A null pointer is accepted.
 ///
 /// # Safety
@@ -559,6 +717,28 @@ pub unsafe extern "C" fn shapeit_conditioning_job_tracks_v1(
     *tracks = job.tracks.as_ptr();
     *tracks_length = job.tracks.len();
     STATUS_OK
+}
+
+#[no_mangle]
+/// Append this job's detected IBD2 tracks directly to a Rust registry.
+///
+/// # Safety
+///
+/// `job` and `registry` must be live. The caller must serialize registry writes.
+pub unsafe extern "C" fn shapeit_conditioning_job_push_tracks_v1(
+    job: *const ConditioningJobV1,
+    registry: *mut Ibd2TracksV1,
+    source_individual: usize,
+) -> u32 {
+    if job.is_null() || registry.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    shapeit_ibd2_tracks_push_v1(
+        registry,
+        source_individual,
+        (*job).tracks.as_ptr(),
+        (*job).tracks.len(),
+    )
 }
 
 #[cfg(test)]

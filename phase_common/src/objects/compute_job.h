@@ -24,14 +24,11 @@
 #define _COMPUTE_THREAD_H
 
 #include <cstdint>
-#include <span>
 
 #include <utils/otools.h>
 
 #include <containers/conditioning_set/conditioning_set_header.h>
 #include <containers/genotype_set.h>
-#include <containers/variant_map.h>
-#include <containers/window_set.h>
 
 struct shapeit_conditioning_job_v1;
 class hmm_parameters;
@@ -40,33 +37,20 @@ class compute_job {
 public:
 
 	//DATA
-	variant_map & V;
-	genotype_set & G;
 	conditioning_set & H;
-
-	//Windows
-	window_set Windows;
-
-	//States
-	std::vector < shapeit_ibd2_track_v1 > Kbanned;
-	std::vector < std::span < const uint32_t > > Kstates;
 	shapeit_conditioning_job_v1 * Conditioning;
 	std::vector < uint8_t > Haploid;
 
-	compute_job(variant_map &, genotype_set &, conditioning_set &);
+	compute_job(genotype_set &, conditioning_set &);
 	compute_job(const compute_job &);
 	~compute_job();
 
 	void free();
-	void make(unsigned int, double, random_number_generator &, random_number_generator &);
-	int runPhase(genotype *, bitmatrix &, hmm_parameters &, unsigned int, double,
-		random_number_generator &, int &, int &);
-	unsigned int size();
+	int run(unsigned int, genotype *, hmm_parameters &, double, unsigned int, double,
+		random_number_generator &, random_number_generator &, random_number_generator &,
+		int &, int &);
+	void windowStats(size_t, int &, int &, size_t &, bool &);
+	size_t size();
 };
-
-inline
-unsigned int compute_job::size() {
-	 return Windows.size();
-}
 
 #endif

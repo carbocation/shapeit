@@ -90,14 +90,14 @@ graph-coordinate conventions in one checked call.
 
 ## Common conditioning jobs
 
-`shapeit_conditioning_job_build_v1` owns a worker's complete per-sample window
-and conditioning-state assembly. It collects and deduplicates the full PBWT
-neighbour set, applies Rust heterozygote-overlap IBD2 protection, and reproduces
-the logical fallback shuffle when a window has fewer than two states. The
-opaque Rust job retains the nested state vectors; C++ borrows immutable spans
-only for statistics and fallback warnings and never copies or reallocates them.
-Each worker rebuilds the same opaque job in place so its scratch storage and
-vector capacities are reused.
+`shapeit_conditioning_graph_job_build_v1` owns a worker's complete per-sample
+window and conditioning-state assembly directly from a Rust genotype graph. It
+collects and deduplicates the full PBWT neighbour set, applies Rust
+heterozygote-overlap IBD2 protection, and reproduces the logical fallback
+shuffle when a window has fewer than two states. The opaque Rust job retains
+the nested state vectors and segment-boundary cM workspace across rebuilds.
+The lower-level buffer-oriented `shapeit_conditioning_job_build_v1` remains
+available for callers that do not own a Rust graph.
 
 `shapeit_hmm_run_job_v1` consumes that opaque job and a Rust-owned genotype
 graph in one call. Rust now owns the complete per-sample window loop, selected-
@@ -111,6 +111,13 @@ action. Current transition and missing probabilities live in reusable Rust
 worker storage; Rust samples the graph and performs burn-in, pruning, or main-
 iteration accumulation before returning. C++ no longer allocates probability
 buffers or calls separate sampling, pruning, and storage bridges per sample.
+
+`shapeit_common_phase_job_run_v1` is the production per-sample boundary. One
+call rebuilds the conditioning job from the graph, runs every HMM window, and
+executes the requested MCMC stage. C++ retains iteration scheduling, progress
+reporting, and error presentation. Window statistics are borrowed afterward,
+and detected IBD2 tracks are appended directly from the conditioning job to the
+Rust registry without a C++ mirror or element-by-element copy.
 
 ## IBD2 registry
 

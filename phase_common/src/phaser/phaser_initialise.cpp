@@ -110,5 +110,5 @@ void phaser::read_files_and_initialise() {
 
 	//step9: Allocate data structures for computations
 	threadData = vector < compute_job >(
-		options["thread"].as < int > (), compute_job(V, G, H));
+		options["thread"].as < int > (), compute_job(G, H));
 }

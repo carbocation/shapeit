@@ -33,6 +33,7 @@ public :
 	std::vector < float > t;
 	std::vector < float > nt;
 	std::vector < float > cm;
+	std::vector < double > cm_double;
 	std::vector < char > rare_allele;
 	double ee;
 	double ed;

@@ -44,33 +44,42 @@ void phaser::phaseWindow(int id_worker, int id_job) {
 	random_number_generator window_rng = rng.fork(RNG_DOMAIN_PHASE_COMMON_WINDOW, iteration_index, id_job);
 	random_number_generator sample_rng = rng.fork(RNG_DOMAIN_PHASE_COMMON_MCMC, iteration_index, id_job);
 	random_number_generator fallback_rng = rng.fork(RNG_DOMAIN_PHASE_COMMON_FALLBACK, iteration_index, id_job);
-	threadData[id_worker].make(id_job, options["hmm-window"].as < double > (), window_rng, fallback_rng);
 	int underflow_recovered_summing = 0;
 	int underflow_recovered_precision = 0;
 
-	//Collect window statistics
-	for (int w = 0 ; w < threadData[id_worker].size() ; w ++) {
-		if (options["thread"].as < int > () > 1) pthread_mutex_lock(&mutex_workers);
-		statH.push(threadData[id_worker].Kstates[w].size()*1.0);
-		statS.push(threadData[id_worker].Windows.W[w].lengthBP(V) * 1.0e-6);
-		if (options["thread"].as < int > () > 1) pthread_mutex_unlock(&mutex_workers);
-	}
-
-	//Run all HMM windows inside the Rust-owned conditioning job
-	const int outcome = threadData[id_worker].runPhase(
-		G.vecG[id_job], H.H_opt_hap, M, iteration_types[iteration_stage],
-		options["mcmc-prune"].as < double > (), sample_rng,
+	//Build conditioning state and run the complete sample job in Rust
+	const int outcome = threadData[id_worker].run(
+		id_job, G.vecG[id_job], M, options["hmm-window"].as < double > (),
+		iteration_types[iteration_stage], options["mcmc-prune"].as < double > (),
+		window_rng, fallback_rng, sample_rng,
 		underflow_recovered_summing, underflow_recovered_precision);
 	switch (outcome) {
 	case -2: vrb.error("Diploid underflow impossible to recover for [" + G.vecG[id_job]->name + "]");
 	case -1: vrb.error("Haploid underflow impossible to recover for [" + G.vecG[id_job]->name + "]");
 	}
 
+	//Collect reporting-only window statistics
+	for (size_t w = 0 ; w < threadData[id_worker].size() ; w ++) {
+		int start_locus = 0, stop_locus = 0;
+		size_t states_length = 0;
+		bool used_fallback = false;
+		threadData[id_worker].windowStats(
+			w, start_locus, stop_locus, states_length, used_fallback);
+		if (used_fallback) {
+			vrb.warning("No PBWT states found [" + G.vecG[id_job]->name + " / w=" +
+				stb.str(w) + "] / Using " + stb.str(states_length) + " random states");
+		}
+		if (options["thread"].as < int > () > 1) pthread_mutex_lock(&mutex_workers);
+		statH.push(states_length*1.0);
+		statS.push((V.vec_pos[stop_locus]->bp - V.vec_pos[start_locus]->bp) * 1.0e-6);
+		if (options["thread"].as < int > () > 1) pthread_mutex_unlock(&mutex_workers);
+	}
+
 	//Copy over new IBD2 constraints into H
 	if (options["thread"].as < int > () > 1) pthread_mutex_lock(&mutex_workers);
 	n_underflow_recovered_summing += underflow_recovered_summing;
 	n_underflow_recovered_precision += underflow_recovered_precision;
-	H.Kbanned.pushIBD2(id_job, threadData[id_worker].Kbanned);
+	H.Kbanned.pushIBD2(id_job, threadData[id_worker].Conditioning);
 	if (options["thread"].as < int > () > 1) pthread_mutex_unlock(&mutex_workers);
 
 }

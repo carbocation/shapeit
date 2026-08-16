@@ -21,8 +21,8 @@
  ******************************************************************************/
 
 #include <objects/compute_job.h>
+#include <shapeit_common.h>
 #include <shapeit_conditioning.h>
-#include <shapeit_hmm.h>
 
 #include <objects/hmm_parameters.h>
 
@@ -32,13 +32,13 @@
 
 using namespace std;
 
-compute_job::compute_job(variant_map & _V, genotype_set & _G, conditioning_set & _H) : V(_V), G(_G), H(_H) {
+compute_job::compute_job(genotype_set & G, conditioning_set & _H) : H(_H) {
 	Conditioning = nullptr;
 	Haploid = vector < uint8_t > (G.n_ind, 0);
 	for (int ind = 0 ; ind < G.n_ind ; ind ++) Haploid[ind] = G.vecG[ind]->isHaploid();
 }
 
-compute_job::compute_job(const compute_job & other) : V(other.V), G(other.G), H(other.H) {
+compute_job::compute_job(const compute_job & other) : H(other.H) {
 	Conditioning = nullptr;
 	Haploid = other.Haploid;
 }
@@ -48,169 +48,118 @@ compute_job::~compute_job() {
 }
 
 void compute_job::free () {
-	Kstates.clear();
 	if (Conditioning != nullptr) {
 		shapeit_conditioning_job_free_v1(Conditioning);
 		Conditioning = nullptr;
 	}
 	vector < uint8_t > ().swap(Haploid);
-	Kbanned.clear();
-	Windows.clear();
 }
 
-void compute_job::make(unsigned int ind, double min_window_size, random_number_generator & job_rng, random_number_generator & fallback_rng) {
+int compute_job::run(unsigned int ind, genotype * genotype_graph,
+	hmm_parameters & model, double min_window_size, unsigned int stage,
+	double prune_threshold, random_number_generator & window_rng,
+	random_number_generator & fallback_rng, random_number_generator & sample_rng,
+	int & underflow_recovered_summing, int & underflow_recovered_precision) {
 	static_assert(sizeof(unsigned int) == sizeof(uint32_t));
 	static_assert(sizeof(unsigned long) == sizeof(uint64_t));
 	static_assert(sizeof(int) == sizeof(int32_t));
-	assert(job_rng.isFresh());
+	assert(window_rng.isFresh());
 	assert(fallback_rng.isFresh());
-	Kstates.clear();
-	Kbanned.clear();
-	Windows.clear();
+	assert(sample_rng.isFresh());
 
-	genotype * genotype_graph = G.vecG[ind];
-	const shapeit_genotype_graph_view_v1 graph = genotype_graph->graphView();
-	vector < double > start_centimorgans(graph.segment_lengths_length);
-	vector < double > stop_centimorgans(graph.segment_lengths_length);
-	for (unsigned int segment = 0, locus = 0 ; segment < graph.segment_lengths_length ; segment ++) {
-		start_centimorgans[segment] = V.vec_pos[locus]->cm;
-		locus += graph.segment_lengths[segment];
-		stop_centimorgans[segment] = V.vec_pos[locus - 1]->cm;
-	}
-
-	shapeit_conditioning_build_v1 parameters = {};
-	parameters.abi_version = SHAPEIT_CONDITIONING_ABI_VERSION;
+	shapeit_common_phase_job_v1 parameters = {};
+	parameters.abi_version = SHAPEIT_COMMON_ABI_VERSION;
 	parameters.struct_size = sizeof(parameters);
-	parameters.variants = graph.variants;
-	parameters.variants_length = graph.variants_length;
-	parameters.variant_count = graph.variant_count;
-	parameters.diplotypes = graph.diplotypes;
-	parameters.diplotypes_length = graph.diplotypes_length;
-	parameters.segment_lengths = graph.segment_lengths;
-	parameters.segment_lengths_length = graph.segment_lengths_length;
-	parameters.segment_start_centimorgans = start_centimorgans.data();
-	parameters.segment_start_centimorgans_length = start_centimorgans.size();
-	parameters.segment_stop_centimorgans = stop_centimorgans.data();
-	parameters.segment_stop_centimorgans_length = stop_centimorgans.size();
-	parameters.minimum_window_centimorgans = min_window_size;
-	parameters.selected_sites = H.sites_pbwt_selection.data();
-	parameters.selected_sites_length = H.sites_pbwt_selection.size();
-	parameters.site_grouping = reinterpret_cast<const int32_t *>(H.sites_pbwt_grouping.data());
-	parameters.site_grouping_length = H.sites_pbwt_grouping.size();
-	parameters.pbwt_neighbors = reinterpret_cast<const int32_t *>(H.indexes_pbwt_neighbour.data());
-	parameters.pbwt_neighbors_length = H.indexes_pbwt_neighbour.size();
-	parameters.pbwt_depth = H.depth;
-	parameters.pbwt_group_count = H.sites_pbwt_ngroups;
-	parameters.target_individual = ind;
-	parameters.target_individual_count = H.n_ind;
-	parameters.haplotype_count = H.n_hap;
-	parameters.haploid_individuals = Haploid.data();
-	parameters.haploid_individuals_length = Haploid.size();
-	parameters.haplotypes = H.H_opt_hap.bytes;
-	parameters.haplotypes_length = H.H_opt_hap.n_bytes;
-	parameters.haplotype_stride = H.H_opt_hap.n_cols >> 3;
-	parameters.maximum_heterozygote_mismatch = 0.75f;
-	parameters.window_seed = job_rng.getSeed();
-	parameters.window_domain = job_rng.getDomain();
-	parameters.window_iteration = job_rng.getIteration();
-	parameters.window_item = job_rng.getItem();
-	parameters.fallback_seed = fallback_rng.getSeed();
-	parameters.fallback_domain = fallback_rng.getDomain();
-	parameters.fallback_iteration = fallback_rng.getIteration();
-	parameters.fallback_item = fallback_rng.getItem();
 
-	uint32_t status = shapeit_conditioning_job_build_v1(&parameters, &Conditioning);
-	if (status == SHAPEIT_CONDITIONING_STATUS_INSUFFICIENT_STATES) {
+	shapeit_conditioning_graph_build_v1 & conditioning = parameters.conditioning;
+	conditioning.abi_version = SHAPEIT_CONDITIONING_ABI_VERSION;
+	conditioning.struct_size = sizeof(conditioning);
+	conditioning.graph = genotype_graph->Graph;
+	conditioning.centimorgans = model.cm_double.data();
+	conditioning.centimorgans_length = model.cm_double.size();
+	conditioning.minimum_window_centimorgans = min_window_size;
+	conditioning.selected_sites = H.sites_pbwt_selection.data();
+	conditioning.selected_sites_length = H.sites_pbwt_selection.size();
+	conditioning.site_grouping = reinterpret_cast<const int32_t *>(H.sites_pbwt_grouping.data());
+	conditioning.site_grouping_length = H.sites_pbwt_grouping.size();
+	conditioning.pbwt_neighbors = reinterpret_cast<const int32_t *>(H.indexes_pbwt_neighbour.data());
+	conditioning.pbwt_neighbors_length = H.indexes_pbwt_neighbour.size();
+	conditioning.pbwt_depth = H.depth;
+	conditioning.pbwt_group_count = H.sites_pbwt_ngroups;
+	conditioning.target_individual = ind;
+	conditioning.target_individual_count = H.n_ind;
+	conditioning.haplotype_count = H.n_hap;
+	conditioning.haploid_individuals = Haploid.data();
+	conditioning.haploid_individuals_length = Haploid.size();
+	conditioning.haplotypes = H.H_opt_hap.bytes;
+	conditioning.haplotypes_length = H.H_opt_hap.n_bytes;
+	conditioning.haplotype_stride = H.H_opt_hap.n_cols >> 3;
+	conditioning.maximum_heterozygote_mismatch = 0.75f;
+	conditioning.window_seed = window_rng.getSeed();
+	conditioning.window_domain = window_rng.getDomain();
+	conditioning.window_iteration = window_rng.getIteration();
+	conditioning.window_item = window_rng.getItem();
+	conditioning.fallback_seed = fallback_rng.getSeed();
+	conditioning.fallback_domain = fallback_rng.getDomain();
+	conditioning.fallback_iteration = fallback_rng.getIteration();
+	conditioning.fallback_item = fallback_rng.getItem();
+
+	shapeit_hmm_phase_job_v1 & phase = parameters.phase;
+	phase.abi_version = SHAPEIT_HMM_ABI_VERSION;
+	phase.struct_size = sizeof(phase);
+	phase.graph = genotype_graph->Graph;
+	phase.haplotypes = H.H_opt_hap.bytes;
+	phase.haplotypes_length = H.H_opt_hap.n_bytes;
+	phase.haplotype_stride = H.H_opt_hap.n_cols >> 3;
+	phase.centimorgans = model.cm.data();
+	phase.centimorgans_length = model.cm.size();
+	phase.recombination = model.t.data();
+	phase.recombination_length = model.t.size();
+	phase.rare_alleles = reinterpret_cast<const int8_t *>(model.rare_allele.data());
+	phase.rare_alleles_length = model.rare_allele.size();
+	phase.effective_population_size = model.Neff;
+	phase.total_haplotypes = model.Nhap;
+	phase.emission_match = model.ee;
+	phase.emission_mismatch = model.ed;
+	phase.stage = stage;
+	phase.prune_threshold = prune_threshold;
+	phase.sample_seed = sample_rng.getSeed();
+	phase.sample_domain = sample_rng.getDomain();
+	phase.sample_iteration = sample_rng.getIteration();
+	phase.sample_item = sample_rng.getItem();
+
+	shapeit_hmm_job_result_v1 result = {};
+	const uint32_t status = shapeit_common_phase_job_run_v1(
+		&parameters, &Conditioning, &result);
+	if (status == SHAPEIT_COMMON_STATUS_INSUFFICIENT_STATES) {
 		vrb.error("Fewer than two conditioning haplotypes are available for [" +
 			genotype_graph->name + "]");
 	}
-	if (status != SHAPEIT_CONDITIONING_STATUS_OK) {
-		throw runtime_error("Rust conditioning job rejected its input layout (status " +
-			to_string(status) + ")");
-	}
-
-	const size_t n_windows = shapeit_conditioning_job_window_count_v1(Conditioning);
-	Windows.W = vector < window > (n_windows);
-	Kstates.resize(n_windows);
-	for (size_t w = 0 ; w < n_windows ; w ++) {
-		shapeit_genotype_window_v1 source_window = {};
-		const uint32_t * states = nullptr;
-		size_t states_length = 0;
-		uint8_t used_fallback = 0;
-		status = shapeit_conditioning_job_window_v1(
-			Conditioning, w, &source_window, &states, &states_length, &used_fallback);
-		if (status != SHAPEIT_CONDITIONING_STATUS_OK) {
-			throw runtime_error("Rust conditioning window accessor failed (status " +
-				to_string(status) + ")");
-		}
-		window & target = Windows.W[w];
-		target.start_locus = source_window.start_locus;
-		target.start_segment = source_window.start_segment;
-		target.start_ambiguous = source_window.start_ambiguous;
-		target.start_missing = source_window.start_missing;
-		target.start_transition = source_window.start_transition;
-		target.stop_locus = source_window.stop_locus;
-		target.stop_segment = source_window.stop_segment;
-		target.stop_ambiguous = source_window.stop_ambiguous;
-		target.stop_missing = source_window.stop_missing;
-		target.stop_transition = source_window.stop_transition;
-		Kstates[w] = span < const uint32_t > (states, states_length);
-		if (used_fallback) {
-			vrb.warning("No PBWT states found [" + genotype_graph->name + " / w=" +
-				stb.str(w) + "] / Using " + stb.str(states_length) + " random states");
-		}
-	}
-
-	const shapeit_conditioning_track_v1 * tracks = nullptr;
-	size_t tracks_length = 0;
-	status = shapeit_conditioning_job_tracks_v1(Conditioning, &tracks, &tracks_length);
-	if (status != SHAPEIT_CONDITIONING_STATUS_OK) {
-		throw runtime_error("Rust conditioning track accessor failed (status " +
-			to_string(status) + ")");
-	}
-	Kbanned.reserve(tracks_length);
-	for (size_t t = 0 ; t < tracks_length ; t ++) {
-		Kbanned.push_back({tracks[t].individual, tracks[t].from, tracks[t].to});
-	}
-}
-
-int compute_job::runPhase(genotype * genotype_graph, bitmatrix & haplotypes,
-	hmm_parameters & model, unsigned int stage, double prune_threshold,
-	random_number_generator & sample_rng, int & underflow_recovered_summing,
-	int & underflow_recovered_precision) {
-	assert(sample_rng.isFresh());
-	shapeit_hmm_phase_job_v1 parameters = {};
-	parameters.abi_version = SHAPEIT_HMM_ABI_VERSION;
-	parameters.struct_size = sizeof(parameters);
-	parameters.graph = genotype_graph->Graph;
-	parameters.conditioning_job = Conditioning;
-	parameters.haplotypes = haplotypes.bytes;
-	parameters.haplotypes_length = haplotypes.n_bytes;
-	parameters.haplotype_stride = haplotypes.n_cols >> 3;
-	parameters.centimorgans = model.cm.data();
-	parameters.centimorgans_length = model.cm.size();
-	parameters.recombination = model.t.data();
-	parameters.recombination_length = model.t.size();
-	parameters.rare_alleles = reinterpret_cast<const int8_t *>(model.rare_allele.data());
-	parameters.rare_alleles_length = model.rare_allele.size();
-	parameters.effective_population_size = model.Neff;
-	parameters.total_haplotypes = model.Nhap;
-	parameters.emission_match = model.ee;
-	parameters.emission_mismatch = model.ed;
-	parameters.stage = stage;
-	parameters.prune_threshold = prune_threshold;
-	parameters.sample_seed = sample_rng.getSeed();
-	parameters.sample_domain = sample_rng.getDomain();
-	parameters.sample_iteration = sample_rng.getIteration();
-	parameters.sample_item = sample_rng.getItem();
-
-	shapeit_hmm_job_result_v1 result = {};
-	const uint32_t status = shapeit_hmm_run_phase_job_v1(&parameters, &result);
-	if (status != SHAPEIT_HMM_STATUS_OK) {
+	if (status != SHAPEIT_COMMON_STATUS_OK) {
 		throw runtime_error("Rust common phase job rejected its input layout (status " +
 			to_string(status) + ")");
 	}
 	underflow_recovered_summing = result.underflow_recovered_summing;
 	underflow_recovered_precision = result.underflow_recovered_precision;
 	return result.fatal_outcome;
+}
+
+size_t compute_job::size() {
+	return shapeit_conditioning_job_window_count_v1(Conditioning);
+}
+
+void compute_job::windowStats(size_t index, int & start_locus, int & stop_locus,
+	size_t & states_length, bool & used_fallback) {
+	shapeit_genotype_window_v1 window = {};
+	const uint32_t * states = nullptr;
+	uint8_t fallback = 0;
+	const uint32_t status = shapeit_conditioning_job_window_v1(
+		Conditioning, index, &window, &states, &states_length, &fallback);
+	if (status != SHAPEIT_CONDITIONING_STATUS_OK) {
+		throw runtime_error("Rust conditioning window accessor failed (status " +
+			to_string(status) + ")");
+	}
+	start_locus = window.start_locus;
+	stop_locus = window.stop_locus;
+	used_fallback = fallback != 0;
 }

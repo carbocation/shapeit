@@ -9,9 +9,9 @@ const STATUS_OUT_OF_BOUNDS: u32 = 3;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Ibd2TrackV1 {
-    individual: i32,
-    from: i32,
-    to: i32,
+    pub(crate) individual: i32,
+    pub(crate) from: i32,
+    pub(crate) to: i32,
 }
 
 #[repr(C)]

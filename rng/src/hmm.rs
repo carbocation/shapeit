@@ -4,7 +4,9 @@ use core::{mem, slice};
 
 use self::single::{shapeit_hmm_run_segment_single_prevalidated_v1, HmmSegmentSingleV1};
 use crate::bitmatrix::shapeit_bitmatrix_subset_transpose_v1;
-use crate::conditioning::ConditioningJobV1;
+use crate::conditioning::{
+    shapeit_conditioning_graph_job_build_v1, ConditioningGraphBuildV1, ConditioningJobV1,
+};
 use crate::genotype::{
     shapeit_genotype_graph_prune_v1, shapeit_genotype_graph_sample_current_v1,
     shapeit_genotype_graph_store_v1, GenotypeGraphV1, GenotypeWindowV1,
@@ -115,6 +117,7 @@ pub struct HmmJobResultV1 {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct HmmPhaseJobV1 {
     abi_version: u32,
     struct_size: u32,
@@ -139,6 +142,14 @@ pub struct HmmPhaseJobV1 {
     sample_domain: u32,
     sample_iteration: u32,
     sample_item: u64,
+}
+
+#[repr(C)]
+pub struct CommonPhaseJobV1 {
+    abi_version: u32,
+    struct_size: usize,
+    conditioning: ConditioningGraphBuildV1,
+    phase: HmmPhaseJobV1,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1706,6 +1717,45 @@ pub unsafe extern "C" fn shapeit_hmm_run_phase_job_v1(
         *result = local_result;
     }
     operation_status
+}
+
+#[no_mangle]
+/// Build conditioning state and execute one complete common-phasing sample job.
+///
+/// This is the coarse production boundary: the opaque conditioning job is
+/// rebuilt in place and immediately consumed by the Rust HMM and MCMC stage.
+///
+/// # Safety
+///
+/// `parameters`, `job`, and `result` must be valid. `job` must contain null or
+/// a live conditioning job. All nested buffers follow the safety contracts of
+/// the conditioning-build and phase-job entry points.
+pub unsafe extern "C" fn shapeit_common_phase_job_run_v1(
+    parameters: *const CommonPhaseJobV1,
+    job: *mut *mut ConditioningJobV1,
+    result: *mut HmmJobResultV1,
+) -> u32 {
+    if parameters.is_null() || job.is_null() || result.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let parameters = &*parameters;
+    if parameters.abi_version != ABI_VERSION
+        || parameters.struct_size < mem::size_of::<CommonPhaseJobV1>()
+        || parameters.conditioning.graph.cast_mut() != parameters.phase.graph
+        || parameters.conditioning.haplotypes != parameters.phase.haplotypes
+        || parameters.conditioning.haplotypes_length != parameters.phase.haplotypes_length
+        || parameters.conditioning.haplotype_stride != parameters.phase.haplotype_stride
+    {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    let conditioning_status =
+        shapeit_conditioning_graph_job_build_v1(&parameters.conditioning, job);
+    if conditioning_status != STATUS_OK {
+        return conditioning_status;
+    }
+    let mut phase = parameters.phase;
+    phase.conditioning_job = *job;
+    shapeit_hmm_run_phase_job_v1(&phase, result)
 }
 
 #[no_mangle]

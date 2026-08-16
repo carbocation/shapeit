@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include <shapeit_genotype.h>
+#include <shapeit_ibd2.h>
 
 #define SHAPEIT_CONDITIONING_ABI_VERSION 1U
 
@@ -62,6 +63,40 @@ typedef struct shapeit_conditioning_build_v1 {
     uint64_t fallback_item;
 } shapeit_conditioning_build_v1;
 
+typedef struct shapeit_conditioning_graph_build_v1 {
+    uint32_t abi_version;
+    size_t struct_size;
+    const shapeit_genotype_graph_v1 * graph;
+    const double * centimorgans;
+    size_t centimorgans_length;
+    float minimum_window_centimorgans;
+    const uint8_t * selected_sites;
+    size_t selected_sites_length;
+    const int32_t * site_grouping;
+    size_t site_grouping_length;
+    const int32_t * pbwt_neighbors;
+    size_t pbwt_neighbors_length;
+    size_t pbwt_depth;
+    size_t pbwt_group_count;
+    size_t target_individual;
+    size_t target_individual_count;
+    size_t haplotype_count;
+    const uint8_t * haploid_individuals;
+    size_t haploid_individuals_length;
+    const uint8_t * haplotypes;
+    size_t haplotypes_length;
+    size_t haplotype_stride;
+    float maximum_heterozygote_mismatch;
+    uint64_t window_seed;
+    uint32_t window_domain;
+    uint32_t window_iteration;
+    uint64_t window_item;
+    uint64_t fallback_seed;
+    uint32_t fallback_domain;
+    uint32_t fallback_iteration;
+    uint64_t fallback_item;
+} shapeit_conditioning_graph_build_v1;
+
 typedef struct shapeit_conditioning_track_v1 {
     int32_t individual;
     int32_t from;
@@ -81,6 +116,10 @@ uint32_t shapeit_conditioning_job_build_v1(
     /* Null allocates a job; a live job is rebuilt while retaining workspace. */
     shapeit_conditioning_job_v1 ** job);
 
+uint32_t shapeit_conditioning_graph_job_build_v1(
+    const shapeit_conditioning_graph_build_v1 * parameters,
+    shapeit_conditioning_job_v1 ** job);
+
 void shapeit_conditioning_job_free_v1(shapeit_conditioning_job_v1 * job);
 
 size_t shapeit_conditioning_job_window_count_v1(
@@ -98,6 +137,11 @@ uint32_t shapeit_conditioning_job_tracks_v1(
     const shapeit_conditioning_job_v1 * job,
     const shapeit_conditioning_track_v1 ** tracks,
     size_t * tracks_length);
+
+uint32_t shapeit_conditioning_job_push_tracks_v1(
+    const shapeit_conditioning_job_v1 * job,
+    shapeit_ibd2_tracks_v1 * registry,
+    size_t source_individual);
 
 #ifdef __cplusplus
 }
