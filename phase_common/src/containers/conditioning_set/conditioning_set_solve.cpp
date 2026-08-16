@@ -21,6 +21,10 @@
  ******************************************************************************/
 
 #include <containers/conditioning_set/conditioning_set_header.h>
+#include <shapeit_pbwt.h>
+
+#include <cstdint>
+#include <stdexcept>
 
 using namespace std;
 
@@ -46,155 +50,36 @@ void * solver_callback(void * ptr) {
 			pthread_mutex_lock(&P->CS->mutex_workers);
 			vrb.progress("  * PBWT phasing sweep", (++P->CS->d_job)*1.0/(P->CS->sites_pbwt_mthreading.back()+1));
 			pthread_mutex_unlock(&P->CS->mutex_workers);
-
 		} else pthread_exit(NULL);
 	}
 }
 
 void conditioning_set::solve(int chunk, genotype_set * GS) {
+	static_assert(sizeof(int) == sizeof(int32_t));
 
-	//Allocate
-	vector < int > A = vector < int > (n_hap, 0);
-	vector < int > B = vector < int > (n_hap, 0);
-	vector < int > C = vector < int > (n_hap, 0);
-	vector < int > D = vector < int > (n_hap, 0);
-	vector < int > R = vector < int > (n_hap, 0);
-	vector < int > G = vector < int > (n_hap, 0);
-	vector < bool > Het = vector < bool > (n_ind, 0);
-	vector < bool > Mis = vector < bool > (n_ind, 0);
-	vector < bool > Amb = vector < bool > (n_ind, 0);
-	const unsigned long bytes_per_locus = H_opt_var.n_cols / 8;
-
-	iota(A.begin(), A.end(), 0);
-	fill(C.begin(), C.end(), 0);
-
-	for (int l = 0 ; l < n_site ; l ++) {
-		bool chnk = (sites_pbwt_mthreading[l] == chunk);
-		bool buff = (sites_pbwt_mthreading[l] < chunk) && (l >= starts_pbwt_mthreading[chunk]);
-
-		if (chnk && l) {
-
-			//1. INIT
-			double thresh = 2.5, s, s0, s1;
-			unsigned int nm = 0, nh = 0;
-			for (int h = 0 ; h < n_hap ; h++) G[h] = (H_opt_var.get(l, h)?1:-1);
-			for (int i = 0 ; i < n_ind ; i ++) {
-				Mis[i] = VAR_GET_MIS(MOD2(l), GS->vecG[i]->Variants[DIV2(l)]);
-				Het[i] = VAR_GET_HET(MOD2(l), GS->vecG[i]->Variants[DIV2(l)]);
-				Amb[i] = (Het[i] || Mis[i]);
-				if (Amb[i]) { G[2*i+0] = 0; G[2*i+1] = 0;}
-				nh+=Het[i];
-			}
-
-			//2. PHASING FIRST PASS
-			while (nh && thresh > 1.0) {
-				int nhOld = nh; nh = 0, nm = 0 ;
-				for (int i = 0, h = 0 ; i < n_ind ; i++, h += 2) {
-					if (Amb[i]) {
-						if (Het[i]) {
-							s = 0.0;
-							if (R[h+0]>0) s += G[A[R[h+0]-1]];
-							if (R[h+0]<(n_hap-1)) s += G[A[R[h+0]+1]];
-							if (R[h+1]>0) s -= G[A[R[h+1]-1]];
-							if (R[h+1]<(n_hap-1)) s -= G[A[R[h+1]+1]];
-							if (s > thresh) { G[h+0] = 1.0; G[h+1] = -1.0; Amb[i] = false; }
-							else if (s < -thresh) { G[h+0] = -1.0; G[h+1] = 1.0; Amb[i] = false; }
-							else ++nh;
-						}
-						if (Mis[i]) {
-							s0 = s1 = 0.0;
-							if (R[h+0]>0) s0 = G[A[R[h+0]-1]];
-							if (R[h+0]<(n_hap-1)) s0 += G[A[R[h+0]+1]];
-							if (R[h+1]>0) s1 = G[A[R[h+1]-1]];
-							if (R[h+1]<(n_hap-1)) s1 += G[A[R[h+1]+1]];
-							if (s0 == -2 && s1 == -2) { G[h+0] = -1.0; G[h+1] = -1.0; Amb[i] = false; }
-							else if (s0 == -2 && s1 == 2) { G[h+0] = -1.0; G[h+1] = 1.0; Amb[i] = false; }
-							else if (s0 == 2 && s1 == -2) { G[h+0] = 1.0; G[h+1] = -1.0; Amb[i] = false; }
-							else if (s0 == 2 && s1 == 2) { G[h+0] = 1.0; G[h+1] = 1.0; Amb[i] = false; }
-							else ++nm;
-						}
-					}
-				}
-				if (nh == nhOld) thresh -= 1.0 ;
-			}
-
-			//3. PHASING SECOND PASS
-			if (nh || nm) {
-				for (int i = 0, h = 0 ; i < n_ind ; i++, h += 2) {
-					if (Amb[i]) {
-						if (Het[i]) {
-							s = 0.0;
-							if (R[h+0]>0) s += G[A[R[h+0]-1]] * scoreBit[l - C[R[h+0]] + 1];
-							if (R[h+0]<(n_hap-1)) s += G[A[R[h+0]+1]] * scoreBit[l - C[R[h+0]+1]+1];
-							if (R[h+1]>0) s -= G[A[R[h+1]-1]] * scoreBit[l - C[R[h+1]] + 1];
-							if (R[h+1]<(n_hap-1)) {
-								//cout << l << " " << h << " " << n_hap << " " << n_ind << " " << l - C[R[h+1]+1] + 1 << " " << scoreBit.size() << endl;
-								s -= G[A[R[h+1]+1]] * scoreBit[l - C[R[h+1]+1] + 1];
-							}
-							if (s > 0) { G[h+0] = 1 ; G[h+1] = -1 ; }
-							else { G[h+0] = -1 ; G[h+1] = 1 ; }
-						}
-						if (Mis[i]) {
-							s0 = s1 = 0.0;
-							if (R[h+0]>0) s0 = G[A[R[h+0]-1]] * scoreBit[l - C[R[h+0]] + 1];
-							if (R[h+0]<(n_hap-1)) s0 += G[A[R[h+0]+1]] * scoreBit[l - C[R[h+0]+1]+1];
-							if (R[h+1]>0) s1 = G[A[R[h+1]-1]] * scoreBit[l - C[R[h+1]] + 1];
-							if (R[h+1]<(n_hap-1)) s1 += G[A[R[h+1]+1]] * scoreBit[l - C[R[h+1]+1] + 1];
-							if (s0 > 0) G[h+0] = 1.0;
-							else G[h+0] = -1.0;
-							if (s1 > 0) G[h+1] = 1.0;
-							else G[h+1] = -1.0;
-						}
-					}
-				}
-			}
-
-			//4. UPDATE HAPS IN MATRIX
-			for (int i = 0 ; i < n_ind ; i++) {
-				if (Het[i] || Mis[i]) {
-					H_opt_var.set(l, 2*i+0, G[2*i+0] > 0);
-					H_opt_var.set(l, 2*i+1, G[2*i+1] > 0);
-				}
-			}
-		}
-
-		if (chnk || buff) {
-			int u = 0, v = 0, p = l, q = l;
-			for (int h = 0 ; h < n_hap ; h ++) {
-				int alookup = A[h], dlookup = C[h];
-				if (dlookup > p) p = dlookup;
-				if (dlookup > q) q = dlookup;
-				unsigned char allele;
-				if (buff) {
-					unsigned long addr = (l - starts_pbwt_mthreading[chunk]) * bytes_per_locus + alookup / 8;
-					allele = (solve_buffers[chunk][addr] >> (7 - (alookup % 8))) & 1;
-				} else allele = H_opt_var.get(l, alookup);
-				if (!allele) {
-					A[u] = alookup;
-					C[u] = p;
-					p = 0;
-					u++;
-				} else {
-					B[v] = alookup;
-					D[v] = q;
-					q = 0;
-					v++;
-				}
-			}
-			std::copy(B.begin(), B.begin()+v, A.begin()+u);
-			std::copy(D.begin(), D.begin()+v, C.begin()+u);
-
-			for (int h = 0 ; h < n_hap ; h ++) R[A[h]] = h;
-		}
+	vector < const uint8_t * > genotype_variants(GS->n_ind);
+	for (int individual = 0 ; individual < GS->n_ind ; individual++)
+		genotype_variants[individual] = GS->vecG[individual]->Variants.data();
+	const size_t genotype_variants_length = GS->vecG.empty() ?
+		0 : GS->vecG.front()->Variants.size();
+	const vector < unsigned char > & buffer = solve_buffers[chunk];
+	const uint32_t status = shapeit_pbwt_solve_chunk_v1(
+		H_opt_var.bytes, H_opt_var.n_bytes, H_opt_var.n_cols >> 3,
+		n_site, n_hap, genotype_variants.data(), genotype_variants.size(),
+		genotype_variants_length,
+		reinterpret_cast<const int32_t *>(sites_pbwt_mthreading.data()),
+		sites_pbwt_mthreading.size(), chunk, starts_pbwt_mthreading[chunk],
+		buffer.data(), buffer.size(), scoreBit.data(), scoreBit.size());
+	if (status != SHAPEIT_PBWT_STATUS_OK) {
+		throw runtime_error("Rust PBWT solver rejected chunk layout (status " +
+			to_string(status) + ")");
 	}
 }
-
 
 void conditioning_set::solve(genotype_set * GS) {
 	tac.clock();
 	i_worker = 0; i_job = 0, d_job = 0;
 
-	//
 	scoreBit = vector < float > (n_site + 1, 0.0);
 	for (int l = 0 ; l < n_site+1 ; ++l) scoreBit[l] = log (l + 1.0);
 
@@ -211,8 +96,6 @@ void conditioning_set::solve(genotype_set * GS) {
 		solve_buffers[chunk].resize(buffer_bytes);
 		if (buffer_bytes) memcpy(solve_buffers[chunk].data(), H_opt_var.bytes + buffer_start * bytes_per_locus, buffer_bytes);
 	}
-
-	//Perform multi-threaded selection
 
 	solver_callback_params tp;
 	tp.GS = GS;

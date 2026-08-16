@@ -51,6 +51,14 @@ scaffold ordering, 8-lane ambiguity codes, diplotype masks, missing counts, and
 transition counts while reducing repeated scans of the packed variants. Output
 storage remains caller-owned.
 
+## PBWT initialization sweep
+
+`shapeit_pbwt_solve_chunk_v1` owns one complete PBWT initialization chunk,
+including prefix replay, heterozygote and missing-genotype resolution, and PBWT
+ordering/divergence updates. C++ retains only chunk scheduling and progress
+reporting. Parallel chunks consume immutable prefix snapshots and write disjoint
+locus rows, so logical results do not depend on worker assignment.
+
 ## Random-number generation
 
 ABI version 1 uses Philox4x32-10. A random block is a pure function of:
