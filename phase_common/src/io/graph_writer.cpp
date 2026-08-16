@@ -59,6 +59,15 @@ void graph_writer::writeGraphs(string fname) {
 	//Write genotype graphs
 	fd.write(reinterpret_cast<char*>(&G.n_ind), sizeof(G.n_ind));
 	for (int g  = 0 ; g < G.n_ind ; g++) {
+		static_assert(sizeof(unsigned long) == sizeof(uint64_t));
+		const shapeit_genotype_graph_view_v1 graph = G.vecG[g]->graphView();
+		if (graph.variant_count != G.vecG[g]->n_variants ||
+			graph.segment_lengths_length != G.vecG[g]->n_segments ||
+			graph.ambiguous_length != G.vecG[g]->n_ambiguous ||
+			graph.missing_count != G.vecG[g]->n_missing ||
+			graph.transition_count != G.vecG[g]->n_transitions) {
+			throw runtime_error("Rust genotype graph returned inconsistent writer metadata");
+		}
 		// name
 		string_write(fd, G.vecG[g]->name);
 		// integers
@@ -72,10 +81,14 @@ void graph_writer::writeGraphs(string fname) {
 		fd.write(reinterpret_cast<char*>(&G.vecG[g]->n_storage_events), sizeof(G.vecG[g]->n_storage_events));
 
 		// vectors
-		fd.write(reinterpret_cast<char*>(&G.vecG[g]->Variants[0]), G.vecG[g]->Variants.size());
-		fd.write(reinterpret_cast<char*>(&G.vecG[g]->Ambiguous[0]), G.vecG[g]->Ambiguous.size());
-		fd.write(reinterpret_cast<char*>(&G.vecG[g]->Diplotypes[0]), G.vecG[g]->Diplotypes.size() * sizeof(unsigned long));
-		fd.write(reinterpret_cast<char*>(&G.vecG[g]->Lengths[0]), G.vecG[g]->Lengths.size() * sizeof(unsigned short));
+		if (graph.variants_length)
+			fd.write(reinterpret_cast<const char *>(graph.variants), graph.variants_length);
+		if (graph.ambiguous_length)
+			fd.write(reinterpret_cast<const char *>(graph.ambiguous), graph.ambiguous_length);
+		if (graph.diplotypes_length)
+			fd.write(reinterpret_cast<const char *>(graph.diplotypes), graph.diplotypes_length * sizeof(uint64_t));
+		if (graph.segment_lengths_length)
+			fd.write(reinterpret_cast<const char *>(graph.segment_lengths), graph.segment_lengths_length * sizeof(uint16_t));
 		shapeit_genotype_storage_view_v1 view = {};
 		const uint32_t status = shapeit_genotype_storage_borrow_v1(G.vecG[g]->Storage, &view);
 		if (status != SHAPEIT_GENOTYPE_STATUS_OK ||

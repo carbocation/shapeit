@@ -89,18 +89,19 @@ int run_haplotype_segment_double_rust(
 	}
 	vector < double > scratch(scratch_length, 0.0);
 	vector < int32_t > alpha_locus(segment_count, 0);
+	const shapeit_genotype_graph_view_v1 graph = G->graphView();
 
 	shapeit_hmm_segment_double_v1 parameters = {};
 	parameters.abi_version = SHAPEIT_HMM_ABI_VERSION;
 	parameters.struct_size = sizeof(parameters);
-	parameters.variants = G->Variants.data();
-	parameters.variants_length = G->Variants.size();
-	parameters.ambiguous = G->Ambiguous.data();
-	parameters.ambiguous_length = G->Ambiguous.size();
-	parameters.segment_lengths = G->Lengths.data();
-	parameters.segment_lengths_length = G->Lengths.size();
-	parameters.diplotypes = reinterpret_cast<const uint64_t *>(G->Diplotypes.data());
-	parameters.diplotypes_length = G->Diplotypes.size();
+	parameters.variants = graph.variants;
+	parameters.variants_length = graph.variants_length;
+	parameters.ambiguous = graph.ambiguous;
+	parameters.ambiguous_length = graph.ambiguous_length;
+	parameters.segment_lengths = graph.segment_lengths;
+	parameters.segment_lengths_length = graph.segment_lengths_length;
+	parameters.diplotypes = graph.diplotypes;
+	parameters.diplotypes_length = graph.diplotypes_length;
 	parameters.haplotypes = Hvar.bytes;
 	parameters.haplotypes_length = Hvar.length;
 	parameters.haplotype_stride = Hvar.stride;
@@ -152,17 +153,18 @@ int run_haplotype_segment_single_rust(
 
 	const subset_transpose_view Hvar = prepare_haplotype_subset(
 		H, conditioning_haplotypes, W.start_locus, W.stop_locus);
+	const shapeit_genotype_graph_view_v1 graph = G->graphView();
 	shapeit_hmm_segment_single_v1 parameters = {};
 	parameters.abi_version = SHAPEIT_HMM_ABI_VERSION;
 	parameters.struct_size = sizeof(parameters);
-	parameters.variants = G->Variants.data();
-	parameters.variants_length = G->Variants.size();
-	parameters.ambiguous = G->Ambiguous.data();
-	parameters.ambiguous_length = G->Ambiguous.size();
-	parameters.segment_lengths = G->Lengths.data();
-	parameters.segment_lengths_length = G->Lengths.size();
-	parameters.diplotypes = reinterpret_cast<const uint64_t *>(G->Diplotypes.data());
-	parameters.diplotypes_length = G->Diplotypes.size();
+	parameters.variants = graph.variants;
+	parameters.variants_length = graph.variants_length;
+	parameters.ambiguous = graph.ambiguous;
+	parameters.ambiguous_length = graph.ambiguous_length;
+	parameters.segment_lengths = graph.segment_lengths;
+	parameters.segment_lengths_length = graph.segment_lengths_length;
+	parameters.diplotypes = graph.diplotypes;
+	parameters.diplotypes_length = graph.diplotypes_length;
 	parameters.haplotypes = Hvar.bytes;
 	parameters.haplotypes_length = Hvar.length;
 	parameters.haplotype_stride = Hvar.stride;

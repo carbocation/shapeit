@@ -41,6 +41,21 @@ typedef struct shapeit_genotype_storage_view_v1 {
 } shapeit_genotype_storage_view_v1;
 
 typedef struct shapeit_genotype_storage_v1 shapeit_genotype_storage_v1;
+typedef struct shapeit_genotype_graph_v1 shapeit_genotype_graph_v1;
+
+typedef struct shapeit_genotype_graph_view_v1 {
+    size_t variant_count;
+    const uint8_t * variants;
+    size_t variants_length;
+    const uint8_t * ambiguous;
+    size_t ambiguous_length;
+    const uint64_t * diplotypes;
+    size_t diplotypes_length;
+    const uint16_t * segment_lengths;
+    size_t segment_lengths_length;
+    size_t missing_count;
+    uint32_t transition_count;
+} shapeit_genotype_graph_view_v1;
 
 #ifdef __cplusplus
 extern "C" {
@@ -67,6 +82,18 @@ uint32_t shapeit_genotype_graph_build_v1(
     uint64_t * diplotypes,
     size_t diplotypes_length,
     uint32_t * transition_count);
+
+uint32_t shapeit_genotype_graph_create_v1(
+    const uint8_t * variants,
+    size_t variants_length,
+    size_t variant_count,
+    shapeit_genotype_graph_v1 ** graph);
+
+uint32_t shapeit_genotype_graph_borrow_v1(
+    const shapeit_genotype_graph_v1 * graph,
+    shapeit_genotype_graph_view_v1 * view);
+
+void shapeit_genotype_graph_free_v1(shapeit_genotype_graph_v1 * graph);
 
 uint32_t shapeit_genotype_pedigree_scaffold_v1(
     uint8_t * child_variants,
@@ -108,6 +135,12 @@ uint32_t shapeit_genotype_prune_v1(
     size_t * output_segment_count,
     uint32_t * output_transition_count);
 
+uint32_t shapeit_genotype_graph_prune_v1(
+    shapeit_genotype_graph_v1 * graph,
+    const double * transition_probabilities,
+    size_t transition_probabilities_length,
+    double threshold_probability_mass);
+
 uint32_t shapeit_genotype_sample_v1(
     uint8_t * variants,
     size_t variants_length,
@@ -118,6 +151,18 @@ uint32_t shapeit_genotype_sample_v1(
     size_t diplotypes_length,
     const uint16_t * segment_lengths,
     size_t segment_lengths_length,
+    const double * transition_probabilities,
+    size_t transition_probabilities_length,
+    const float * missing_probabilities,
+    size_t missing_probabilities_length,
+    uint8_t haploid,
+    uint64_t seed,
+    uint32_t domain,
+    uint32_t iteration,
+    uint64_t item);
+
+uint32_t shapeit_genotype_graph_sample_v1(
+    shapeit_genotype_graph_v1 * graph,
     const double * transition_probabilities,
     size_t transition_probabilities_length,
     const float * missing_probabilities,
@@ -170,6 +215,11 @@ uint32_t shapeit_genotype_solve_storage_v1(
     size_t diplotypes_length,
     const uint16_t * segment_lengths,
     size_t segment_lengths_length,
+    const shapeit_genotype_storage_v1 * storage,
+    uint8_t haploid);
+
+uint32_t shapeit_genotype_graph_solve_storage_v1(
+    shapeit_genotype_graph_v1 * graph,
     const shapeit_genotype_storage_v1 * storage,
     uint8_t haploid);
 

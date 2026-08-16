@@ -21,7 +21,8 @@
  ******************************************************************************/
 
 #include <objects/genotype/genotype_header.h>
-#include <shapeit_genotype.h>
+
+#include <stdexcept>
 
 using namespace std;
 
@@ -30,10 +31,12 @@ genotype::genotype(unsigned int _index) {
 	n_segments = 0;
 	n_variants = 0;
 	n_ambiguous = 0;
+	n_missing = 0;
+	n_transitions = 0;
 	n_stored_transitionProbs = 0;
 	n_storage_events = 0;
+	Graph = nullptr;
 	Storage = nullptr;
-	std::fill(curr_dipcodes, curr_dipcodes + 64, 0);
 	this->name = "";
 	double_precision = false;
 	haploid = false;
@@ -44,14 +47,31 @@ genotype::~genotype() {
 }
 
 void genotype::free() {
+	if (Graph != nullptr) {
+		shapeit_genotype_graph_free_v1(Graph);
+		Graph = nullptr;
+	}
 	if (Storage != nullptr) {
 		shapeit_genotype_storage_free_v1(Storage);
 		Storage = nullptr;
 	}
-	std::fill(curr_dipcodes, curr_dipcodes + 64, 0);
 	name = "";
 	vector < unsigned char > ().swap(Variants);
-	vector < unsigned char > ().swap(Ambiguous);
-	vector < unsigned long > ().swap(Diplotypes);
-	vector < unsigned short > ().swap(Lengths);
+}
+
+shapeit_genotype_graph_view_v1 genotype::graphView() const {
+	if (Graph == nullptr) throw runtime_error("Genotype graph has not been built");
+	shapeit_genotype_graph_view_v1 view = {};
+	const uint32_t status = shapeit_genotype_graph_borrow_v1(Graph, &view);
+	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
+		throw runtime_error("Rust genotype graph returned an invalid view (status " +
+			to_string(status) + ")");
+	}
+	return view;
+}
+
+span < const unsigned char > genotype::packedVariants() const {
+	if (Graph == nullptr) return span < const unsigned char > (Variants.data(), Variants.size());
+	const shapeit_genotype_graph_view_v1 view = graphView();
+	return span < const unsigned char > (view.variants, view.variants_length);
 }

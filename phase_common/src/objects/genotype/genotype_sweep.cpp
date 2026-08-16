@@ -30,13 +30,9 @@
 using namespace std;
 
 void genotype::sample(vector < double > & CurrentTransProbabilities, vector < float > & CurrentMissingProbabilities, random_number_generator & job_rng) {
-	static_assert(sizeof(unsigned long) == sizeof(uint64_t));
 	assert(job_rng.isFresh());
-	const uint32_t status = shapeit_genotype_sample_v1(
-		Variants.data(), Variants.size(), n_variants,
-		Ambiguous.data(), Ambiguous.size(),
-		reinterpret_cast<const uint64_t *>(Diplotypes.data()), Diplotypes.size(),
-		Lengths.data(), Lengths.size(), CurrentTransProbabilities.data(),
+	const uint32_t status = shapeit_genotype_graph_sample_v1(
+		Graph, CurrentTransProbabilities.data(),
 		CurrentTransProbabilities.size(), CurrentMissingProbabilities.data(),
 		CurrentMissingProbabilities.size(), haploid, job_rng.getSeed(),
 		job_rng.getDomain(), job_rng.getIteration(), job_rng.getItem());
@@ -47,12 +43,7 @@ void genotype::sample(vector < double > & CurrentTransProbabilities, vector < fl
 }
 
 void genotype::solve() {
-	static_assert(sizeof(unsigned long) == sizeof(uint64_t));
-	const uint32_t status = shapeit_genotype_solve_storage_v1(
-		Variants.data(), Variants.size(), n_variants,
-		Ambiguous.data(), Ambiguous.size(),
-		reinterpret_cast<const uint64_t *>(Diplotypes.data()), Diplotypes.size(),
-		Lengths.data(), Lengths.size(), Storage, haploid);
+	const uint32_t status = shapeit_genotype_graph_solve_storage_v1(Graph, Storage, haploid);
 	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
 		throw runtime_error("Rust genotype solver rejected stored graph state (status " +
 			to_string(status) + ")");

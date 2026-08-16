@@ -72,24 +72,25 @@ void compute_job::make(unsigned int ind, double min_window_size, random_number_g
 	Windows.clear();
 
 	genotype * genotype_graph = G.vecG[ind];
-	vector < double > start_centimorgans(genotype_graph->n_segments);
-	vector < double > stop_centimorgans(genotype_graph->n_segments);
-	for (unsigned int segment = 0, locus = 0 ; segment < genotype_graph->n_segments ; segment ++) {
+	const shapeit_genotype_graph_view_v1 graph = genotype_graph->graphView();
+	vector < double > start_centimorgans(graph.segment_lengths_length);
+	vector < double > stop_centimorgans(graph.segment_lengths_length);
+	for (unsigned int segment = 0, locus = 0 ; segment < graph.segment_lengths_length ; segment ++) {
 		start_centimorgans[segment] = V.vec_pos[locus]->cm;
-		locus += genotype_graph->Lengths[segment];
+		locus += graph.segment_lengths[segment];
 		stop_centimorgans[segment] = V.vec_pos[locus - 1]->cm;
 	}
 
 	shapeit_conditioning_build_v1 parameters = {};
 	parameters.abi_version = SHAPEIT_CONDITIONING_ABI_VERSION;
 	parameters.struct_size = sizeof(parameters);
-	parameters.variants = genotype_graph->Variants.data();
-	parameters.variants_length = genotype_graph->Variants.size();
+	parameters.variants = graph.variants;
+	parameters.variants_length = graph.variants_length;
 	parameters.variant_count = genotype_graph->n_variants;
-	parameters.diplotypes = reinterpret_cast<const uint64_t *>(genotype_graph->Diplotypes.data());
-	parameters.diplotypes_length = genotype_graph->Diplotypes.size();
-	parameters.segment_lengths = genotype_graph->Lengths.data();
-	parameters.segment_lengths_length = genotype_graph->Lengths.size();
+	parameters.diplotypes = graph.diplotypes;
+	parameters.diplotypes_length = graph.diplotypes_length;
+	parameters.segment_lengths = graph.segment_lengths;
+	parameters.segment_lengths_length = graph.segment_lengths_length;
 	parameters.segment_start_centimorgans = start_centimorgans.data();
 	parameters.segment_start_centimorgans_length = start_centimorgans.size();
 	parameters.segment_stop_centimorgans = stop_centimorgans.data();

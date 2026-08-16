@@ -40,33 +40,17 @@ uint32_t genotype::setHetsAsMissing() {
 }
 
 void genotype::build() {
-	static_assert(sizeof(unsigned long) == sizeof(uint64_t));
-
-	size_t segment_count = 0;
-	size_t ambiguous_count = 0;
-	size_t missing_count = 0;
-	uint32_t status = shapeit_genotype_graph_sizes_v1(
-		Variants.data(), Variants.size(), n_variants,
-		&segment_count, &ambiguous_count, &missing_count);
+	if (Graph != nullptr) throw runtime_error("Genotype graph has already been built");
+	uint32_t status = shapeit_genotype_graph_create_v1(
+		Variants.data(), Variants.size(), n_variants, &Graph);
 	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
-		throw runtime_error("Rust genotype graph sizing rejected the packed variants (status " +
+		throw runtime_error("Rust genotype graph construction rejected the packed variants (status " +
 			to_string(status) + ")");
 	}
-
-	Lengths.resize(segment_count);
-	Ambiguous.resize(ambiguous_count);
-	Diplotypes.resize(segment_count);
-	status = shapeit_genotype_graph_build_v1(
-		Variants.data(), Variants.size(), n_variants,
-		Lengths.data(), Lengths.size(), Ambiguous.data(), Ambiguous.size(),
-		reinterpret_cast<uint64_t *>(Diplotypes.data()), Diplotypes.size(),
-		&n_transitions);
-	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
-		throw runtime_error("Rust genotype graph builder rejected its output layout (status " +
-			to_string(status) + ")");
-	}
-
-	n_segments = segment_count;
-	n_ambiguous = ambiguous_count;
-	n_missing = missing_count;
+	const shapeit_genotype_graph_view_v1 view = graphView();
+	n_segments = view.segment_lengths_length;
+	n_ambiguous = view.ambiguous_length;
+	n_missing = view.missing_count;
+	n_transitions = view.transition_count;
+	vector < unsigned char > ().swap(Variants);
 }

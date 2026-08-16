@@ -48,8 +48,11 @@ window rather than crossing the ABI within a locus loop.
 `shapeit_genotype_graph_sizes_v1` and `shapeit_genotype_graph_build_v1` own the
 per-sample common-phasing graph builder. They preserve segment splitting,
 scaffold ordering, 8-lane ambiguity codes, diplotype masks, missing counts, and
-transition counts while reducing repeated scans of the packed variants. Output
-storage remains caller-owned.
+transition counts while reducing repeated scans of the packed variants. The
+buffer-oriented ABI remains available, while `phase_common` uses an opaque
+Rust-owned graph that retains packed variants and every derived graph vector;
+C++ consumers receive short-lived read-only views rather than parallel mutable
+containers.
 
 `shapeit_genotype_sample_v1` samples a complete graph in one call, including
 forward/backward transition sampling, missing-genotype imputation, and applying

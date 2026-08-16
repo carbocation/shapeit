@@ -57,10 +57,11 @@ void haplotype_set::updateHaplotypes(genotype_set & G, bool first_time) {
 	const size_t variants_length = (n_site + 1) >> 1;
 	VariantViews.resize(G.n_ind);
 	for (unsigned int i = 0 ; i < G.n_ind ; i ++) {
-		if (G.vecG[i]->Variants.size() < variants_length) {
+		const span < const unsigned char > variants = G.vecG[i]->packedVariants();
+		if (variants.size() < variants_length) {
 			throw runtime_error("Packed genotype variants are shorter than the haplotype matrix");
 		}
-		VariantViews[i] = G.vecG[i]->Variants.data();
+		VariantViews[i] = variants.data();
 	}
 	const uint32_t status = shapeit_bitmatrix_refresh_haplotypes_v1(
 		VariantViews.data(), VariantViews.size(), variants_length, n_site,

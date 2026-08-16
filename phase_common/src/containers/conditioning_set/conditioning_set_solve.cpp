@@ -58,10 +58,14 @@ void conditioning_set::solve(int chunk, genotype_set * GS) {
 	static_assert(sizeof(int) == sizeof(int32_t));
 
 	vector < const uint8_t * > genotype_variants(GS->n_ind);
-	for (int individual = 0 ; individual < GS->n_ind ; individual++)
-		genotype_variants[individual] = GS->vecG[individual]->Variants.data();
-	const size_t genotype_variants_length = GS->vecG.empty() ?
-		0 : GS->vecG.front()->Variants.size();
+	size_t genotype_variants_length = 0;
+	for (int individual = 0 ; individual < GS->n_ind ; individual++) {
+		const span < const unsigned char > variants = GS->vecG[individual]->packedVariants();
+		if (individual == 0) genotype_variants_length = variants.size();
+		else if (variants.size() != genotype_variants_length)
+			throw runtime_error("Packed genotype variant lengths differ across samples");
+		genotype_variants[individual] = variants.data();
+	}
 	const vector < unsigned char > & buffer = solve_buffers[chunk];
 	const uint32_t status = shapeit_pbwt_solve_chunk_v1(
 		H_opt_var.bytes, H_opt_var.n_bytes, H_opt_var.n_cols >> 3,
