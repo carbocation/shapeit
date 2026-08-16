@@ -21,98 +21,52 @@
  ******************************************************************************/
 
 #include <objects/genotype/genotype_header.h>
+#include <shapeit_genotype.h>
+
+#include <cstdint>
+#include <stdexcept>
 
 using namespace std;
 
-//counts[0] : # observed mendel errors
-//counts[1] : # possible mendel errors
-//counts[2] : # hets being scaffolded
-//counts[3] : # hets not being scaffolded
-void genotype::scaffoldTrio(genotype * gfather, genotype * gmother, vector < unsigned int > & counts) {
-	for (int v = 0 ; v < n_variants ; v ++) {
-		if (VAR_GET_HET(MOD2(v), Variants[DIV2(v)])) {
-			bool father_is_hom = VAR_GET_HOM(MOD2(v), gfather->Variants[DIV2(v)]);
-			bool mother_is_hom = VAR_GET_HOM(MOD2(v), gmother->Variants[DIV2(v)]);
-			if (father_is_hom && mother_is_hom) {
-				bool fath0 = VAR_GET_HAP0(MOD2(v), gfather->Variants[DIV2(v)]);
-				bool moth0 = VAR_GET_HAP0(MOD2(v), gmother->Variants[DIV2(v)]);
-				if (fath0 != moth0) {
-					VAR_SET_SCA(MOD2(v), Variants[DIV2(v)]); counts[2]++;
-					fath0?VAR_SET_HAP0(MOD2(v), Variants[DIV2(v)]):VAR_CLR_HAP0(MOD2(v), Variants[DIV2(v)]);
-					fath0?VAR_CLR_HAP1(MOD2(v), Variants[DIV2(v)]):VAR_SET_HAP1(MOD2(v), Variants[DIV2(v)]);
-				} else counts[0]++;
-			} else if (father_is_hom) {
-				bool fath0 = VAR_GET_HAP0(MOD2(v), gfather->Variants[DIV2(v)]);
-				VAR_SET_SCA(MOD2(v), Variants[DIV2(v)]); counts[2]++;
-				fath0?VAR_SET_HAP0(MOD2(v), Variants[DIV2(v)]):VAR_CLR_HAP0(MOD2(v), Variants[DIV2(v)]);
-				fath0?VAR_CLR_HAP1(MOD2(v), Variants[DIV2(v)]):VAR_SET_HAP1(MOD2(v), Variants[DIV2(v)]);
-			} else if (mother_is_hom) {
-				bool moth0 = VAR_GET_HAP0(MOD2(v), gmother->Variants[DIV2(v)]);
-				VAR_SET_SCA(MOD2(v), Variants[DIV2(v)]); counts[2]++;
-				moth0?VAR_CLR_HAP0(MOD2(v), Variants[DIV2(v)]):VAR_SET_HAP0(MOD2(v), Variants[DIV2(v)]);
-				moth0?VAR_SET_HAP1(MOD2(v), Variants[DIV2(v)]):VAR_CLR_HAP1(MOD2(v), Variants[DIV2(v)]);
-			} else counts[3]++;
-			counts[1] ++;
-		} else if (VAR_GET_HOM(MOD2(v), Variants[DIV2(v)])) {
-			bool father_is_hom = VAR_GET_HOM(MOD2(v), gfather->Variants[DIV2(v)]);
-			bool mother_is_hom = VAR_GET_HOM(MOD2(v), gmother->Variants[DIV2(v)]);
-			bool fath0 = VAR_GET_HAP0(MOD2(v), gfather->Variants[DIV2(v)]);
-			bool moth0 = VAR_GET_HAP0(MOD2(v), gmother->Variants[DIV2(v)]);
-			bool child0 = VAR_GET_HAP0(MOD2(v), Variants[DIV2(v)]);
-			if (father_is_hom && fath0 != child0) counts[0]++;
-			if (mother_is_hom && moth0 != child0) counts[0]++;
-			counts[1] ++;
-		} else if (VAR_GET_MIS(MOD2(v), Variants[DIV2(v)])) {
-			bool father_is_hom = VAR_GET_HOM(MOD2(v), gfather->Variants[DIV2(v)]);
-			bool mother_is_hom = VAR_GET_HOM(MOD2(v), gmother->Variants[DIV2(v)]);
-			bool fath0 = VAR_GET_HAP0(MOD2(v), gfather->Variants[DIV2(v)]);
-			bool moth0 = VAR_GET_HAP0(MOD2(v), gmother->Variants[DIV2(v)]);
-			if (fath0 != moth0) VAR_SET_SCA(MOD2(v), Variants[DIV2(v)]);
-			else VAR_SET_HOM(MOD2(v), Variants[DIV2(v)]);
-			fath0?VAR_SET_HAP0(MOD2(v), Variants[DIV2(v)]):VAR_CLR_HAP0(MOD2(v), Variants[DIV2(v)]);
-			moth0?VAR_SET_HAP1(MOD2(v), Variants[DIV2(v)]):VAR_CLR_HAP1(MOD2(v), Variants[DIV2(v)]);
-		}
+namespace {
+
+void scaffoldPedigree(
+	genotype * child,
+	genotype * father,
+	genotype * mother,
+	uint32_t mode,
+	vector < unsigned int > & counts) {
+	static_assert(sizeof(unsigned int) == sizeof(uint32_t));
+	if (counts.size() < 4) throw runtime_error("Pedigree count buffer must contain four values");
+
+	const uint8_t * father_variants = father ? father->Variants.data() : nullptr;
+	const size_t father_length = father ? father->Variants.size() : 0;
+	const uint8_t * mother_variants = mother ? mother->Variants.data() : nullptr;
+	const size_t mother_length = mother ? mother->Variants.size() : 0;
+	uint32_t status = shapeit_genotype_pedigree_scaffold_v1(
+		child->Variants.data(), child->Variants.size(), child->n_variants,
+		father_variants, father_length, mother_variants, mother_length, mode,
+		reinterpret_cast<uint32_t *>(counts.data()), counts.size());
+	if (status != SHAPEIT_GENOTYPE_STATUS_OK) {
+		throw runtime_error("Rust pedigree scaffolding rejected its inputs (status " +
+			to_string(status) + ")");
 	}
+}
+
+}
+
+// counts[0]: observed Mendelian errors
+// counts[1]: possible Mendelian errors
+// counts[2]: heterozygotes scaffolded
+// counts[3]: heterozygotes not scaffolded
+void genotype::scaffoldTrio(genotype * gfather, genotype * gmother, vector < unsigned int > & counts) {
+	scaffoldPedigree(this, gfather, gmother, SHAPEIT_GENOTYPE_PEDIGREE_TRIO, counts);
 }
 
 void genotype::scaffoldDuoFather(genotype * gfather, vector < unsigned int > & counts) {
-	for (int v = 0 ; v < n_variants ; v ++) {
-		if (VAR_GET_HET(MOD2(v), Variants[DIV2(v)])) {
-			bool father_is_hom = VAR_GET_HOM(MOD2(v), gfather->Variants[DIV2(v)]);
-			if (father_is_hom) {
-				bool fath0 = VAR_GET_HAP0(MOD2(v), gfather->Variants[DIV2(v)]);
-				VAR_SET_SCA(MOD2(v), Variants[DIV2(v)]); counts[2]++;
-				fath0?VAR_SET_HAP0(MOD2(v), Variants[DIV2(v)]):VAR_CLR_HAP0(MOD2(v), Variants[DIV2(v)]);
-				fath0?VAR_CLR_HAP1(MOD2(v), Variants[DIV2(v)]):VAR_SET_HAP1(MOD2(v), Variants[DIV2(v)]);
-			} else counts[3]++;
-			counts[1] ++;
-		} else if (VAR_GET_HOM(MOD2(v), Variants[DIV2(v)])) {
-			bool father_is_hom = VAR_GET_HOM(MOD2(v), gfather->Variants[DIV2(v)]);
-			bool fath0 = VAR_GET_HAP0(MOD2(v), gfather->Variants[DIV2(v)]);
-			bool child0 = VAR_GET_HAP0(MOD2(v), Variants[DIV2(v)]);
-			if (father_is_hom && fath0 != child0) counts[0]++;
-			counts[1] ++;
-		}
-	}
+	scaffoldPedigree(this, gfather, nullptr, SHAPEIT_GENOTYPE_PEDIGREE_FATHER, counts);
 }
 
 void genotype::scaffoldDuoMother(genotype * gmother, vector < unsigned int > & counts) {
-	for (int v = 0 ; v < n_variants ; v ++) {
-		if (VAR_GET_HET(MOD2(v), Variants[DIV2(v)])) {
-			bool mother_is_hom = VAR_GET_HOM(MOD2(v), gmother->Variants[DIV2(v)]);
-			if (mother_is_hom) {
-				bool moth0 = VAR_GET_HAP0(MOD2(v), gmother->Variants[DIV2(v)]);
-				VAR_SET_SCA(MOD2(v), Variants[DIV2(v)]); counts[2]++;
-				moth0?VAR_CLR_HAP0(MOD2(v), Variants[DIV2(v)]):VAR_SET_HAP0(MOD2(v), Variants[DIV2(v)]);
-				moth0?VAR_SET_HAP1(MOD2(v), Variants[DIV2(v)]):VAR_CLR_HAP1(MOD2(v), Variants[DIV2(v)]);
-			} else counts[3]++;
-			counts[1] ++;
-		} else if (VAR_GET_HOM(MOD2(v), Variants[DIV2(v)])) {
-			bool mother_is_hom = VAR_GET_HOM(MOD2(v), gmother->Variants[DIV2(v)]);
-			bool moth0 = VAR_GET_HAP0(MOD2(v), gmother->Variants[DIV2(v)]);
-			bool child0 = VAR_GET_HAP0(MOD2(v), Variants[DIV2(v)]);
-			if (mother_is_hom && moth0 != child0) counts[0]++;
-			counts[1] ++;
-		}
-	}
+	scaffoldPedigree(this, nullptr, gmother, SHAPEIT_GENOTYPE_PEDIGREE_MOTHER, counts);
 }

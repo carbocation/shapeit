@@ -206,6 +206,113 @@ fn variant_nibble(variants: &[u8], locus: usize) -> u8 {
 }
 
 #[inline]
+fn set_variant_nibble(variants: &mut [u8], locus: usize, value: u8) {
+    let shift = (locus & 1) << 2;
+    variants[locus >> 1] = (variants[locus >> 1] & !(0x0f << shift)) | (value << shift);
+}
+
+#[derive(Clone, Copy)]
+enum PedigreeMode {
+    Trio,
+    Father,
+    Mother,
+}
+
+fn scaffold_pedigree(
+    child: &mut [u8],
+    father: Option<&[u8]>,
+    mother: Option<&[u8]>,
+    variant_count: usize,
+    mode: PedigreeMode,
+    counts: &mut [u32],
+) {
+    for locus in 0..variant_count {
+        let mut child_code = variant_nibble(child, locus);
+        let child_graph = graph_code(child_code);
+        let father_code = father.map(|variants| variant_nibble(variants, locus));
+        let mother_code = mother.map(|variants| variant_nibble(variants, locus));
+        if child_graph == 2 {
+            let father_homozygous = father_code.is_some_and(|code| graph_code(code) == 0);
+            let mother_homozygous = mother_code.is_some_and(|code| graph_code(code) == 0);
+            match mode {
+                PedigreeMode::Trio if father_homozygous && mother_homozygous => {
+                    let father_allele = father_code.unwrap() & 4 != 0;
+                    let mother_allele = mother_code.unwrap() & 4 != 0;
+                    if father_allele != mother_allele {
+                        child_code |= 3;
+                        counts[2] = counts[2].wrapping_add(1);
+                        if father_allele {
+                            child_code = (child_code | 4) & !8;
+                        } else {
+                            child_code = (child_code & !4) | 8;
+                        }
+                    } else {
+                        counts[0] = counts[0].wrapping_add(1);
+                    }
+                }
+                PedigreeMode::Trio | PedigreeMode::Father if father_homozygous => {
+                    let father_allele = father_code.unwrap() & 4 != 0;
+                    child_code |= 3;
+                    counts[2] = counts[2].wrapping_add(1);
+                    if father_allele {
+                        child_code = (child_code | 4) & !8;
+                    } else {
+                        child_code = (child_code & !4) | 8;
+                    }
+                }
+                PedigreeMode::Trio | PedigreeMode::Mother if mother_homozygous => {
+                    let mother_allele = mother_code.unwrap() & 4 != 0;
+                    child_code |= 3;
+                    counts[2] = counts[2].wrapping_add(1);
+                    if mother_allele {
+                        child_code = (child_code & !4) | 8;
+                    } else {
+                        child_code = (child_code | 4) & !8;
+                    }
+                }
+                _ => counts[3] = counts[3].wrapping_add(1),
+            }
+            counts[1] = counts[1].wrapping_add(1);
+            set_variant_nibble(child, locus, child_code);
+        } else if child_graph == 0 {
+            let child_allele = child_code & 4 != 0;
+            if matches!(mode, PedigreeMode::Trio | PedigreeMode::Father)
+                && father_code
+                    .is_some_and(|code| graph_code(code) == 0 && (code & 4 != 0) != child_allele)
+            {
+                counts[0] = counts[0].wrapping_add(1);
+            }
+            if matches!(mode, PedigreeMode::Trio | PedigreeMode::Mother)
+                && mother_code
+                    .is_some_and(|code| graph_code(code) == 0 && (code & 4 != 0) != child_allele)
+            {
+                counts[0] = counts[0].wrapping_add(1);
+            }
+            counts[1] = counts[1].wrapping_add(1);
+        } else if child_graph == 1 && matches!(mode, PedigreeMode::Trio) {
+            let father_allele = father_code.unwrap() & 4 != 0;
+            let mother_allele = mother_code.unwrap() & 4 != 0;
+            if father_allele != mother_allele {
+                child_code |= 3;
+            } else {
+                child_code &= !3;
+            }
+            if father_allele {
+                child_code |= 4;
+            } else {
+                child_code &= !4;
+            }
+            if mother_allele {
+                child_code |= 8;
+            } else {
+                child_code &= !8;
+            }
+            set_variant_nibble(child, locus, child_code);
+        }
+    }
+}
+
+#[inline]
 fn graph_code(variant: u8) -> u8 {
     variant & 3
 }
@@ -215,6 +322,26 @@ fn required_variant_bytes(variant_count: usize) -> Result<usize, u32> {
         .checked_add(1)
         .map(|value| value >> 1)
         .ok_or(STATUS_INTEGER_OVERFLOW)
+}
+
+fn byte_ranges_overlap(
+    first: *const u8,
+    first_length: usize,
+    second: *const u8,
+    second_length: usize,
+) -> Result<bool, u32> {
+    if first_length == 0 || second_length == 0 {
+        return Ok(false);
+    }
+    let first_start = first as usize;
+    let second_start = second as usize;
+    let first_stop = first_start
+        .checked_add(first_length)
+        .ok_or(STATUS_INTEGER_OVERFLOW)?;
+    let second_stop = second_start
+        .checked_add(second_length)
+        .ok_or(STATUS_INTEGER_OVERFLOW)?;
+    Ok(first_start < second_stop && second_start < first_stop)
 }
 
 fn graph_sizes(variants: &[u8], variant_count: usize) -> GraphSizes {
@@ -1042,6 +1169,189 @@ pub unsafe extern "C" fn shapeit_genotype_graph_build_v1(
 }
 
 #[no_mangle]
+/// Apply trio or duo Mendelian scaffolding to one packed child genotype.
+///
+/// # Safety
+///
+/// Required parent buffers must be readable for the packed variant length,
+/// `child_variants` must be writable for that length, and `counts` must be
+/// writable for four `u32` values. Mutable buffers must not overlap a parent.
+pub unsafe extern "C" fn shapeit_genotype_pedigree_scaffold_v1(
+    child_variants: *mut u8,
+    child_variants_length: usize,
+    variant_count: usize,
+    father_variants: *const u8,
+    father_variants_length: usize,
+    mother_variants: *const u8,
+    mother_variants_length: usize,
+    pedigree_mode: u32,
+    counts: *mut u32,
+    counts_length: usize,
+) -> u32 {
+    if counts.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let required = match required_variant_bytes(variant_count) {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
+    if required > child_variants_length || counts_length < 4 {
+        return STATUS_OUT_OF_BOUNDS;
+    }
+    if required != 0 && child_variants.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let mode = match pedigree_mode {
+        0 => PedigreeMode::Trio,
+        1 => PedigreeMode::Father,
+        2 => PedigreeMode::Mother,
+        _ => return STATUS_INVALID_DIMENSIONS,
+    };
+    let father_required = matches!(mode, PedigreeMode::Trio | PedigreeMode::Father);
+    let mother_required = matches!(mode, PedigreeMode::Trio | PedigreeMode::Mother);
+    if required != 0
+        && ((father_required && father_variants.is_null())
+            || (mother_required && mother_variants.is_null()))
+    {
+        return STATUS_NULL_POINTER;
+    }
+    if (father_required && required > father_variants_length)
+        || (mother_required && required > mother_variants_length)
+    {
+        return STATUS_OUT_OF_BOUNDS;
+    }
+    let counts_bytes = 4 * core::mem::size_of::<u32>();
+    let child = child_variants.cast_const();
+    let counts_bytes_pointer = counts.cast::<u8>().cast_const();
+    let child_counts_overlap =
+        byte_ranges_overlap(child, required, counts_bytes_pointer, counts_bytes);
+    let father_child_overlap = if father_required {
+        byte_ranges_overlap(child, required, father_variants, required)
+    } else {
+        Ok(false)
+    };
+    let mother_child_overlap = if mother_required {
+        byte_ranges_overlap(child, required, mother_variants, required)
+    } else {
+        Ok(false)
+    };
+    let father_counts_overlap = if father_required {
+        byte_ranges_overlap(
+            father_variants,
+            required,
+            counts_bytes_pointer,
+            counts_bytes,
+        )
+    } else {
+        Ok(false)
+    };
+    let mother_counts_overlap = if mother_required {
+        byte_ranges_overlap(
+            mother_variants,
+            required,
+            counts_bytes_pointer,
+            counts_bytes,
+        )
+    } else {
+        Ok(false)
+    };
+    for overlap in [
+        child_counts_overlap,
+        father_child_overlap,
+        mother_child_overlap,
+        father_counts_overlap,
+        mother_counts_overlap,
+    ] {
+        match overlap {
+            Ok(true) => return STATUS_INVALID_DIMENSIONS,
+            Err(status) => return status,
+            Ok(false) => {}
+        }
+    }
+
+    let child = if required == 0 {
+        &mut []
+    } else {
+        slice::from_raw_parts_mut(child_variants, required)
+    };
+    let father = if father_required {
+        Some(if required == 0 {
+            &[]
+        } else {
+            slice::from_raw_parts(father_variants, required)
+        })
+    } else {
+        None
+    };
+    let mother = if mother_required {
+        Some(if required == 0 {
+            &[]
+        } else {
+            slice::from_raw_parts(mother_variants, required)
+        })
+    } else {
+        None
+    };
+    let counts = slice::from_raw_parts_mut(counts, 4);
+    scaffold_pedigree(child, father, mother, variant_count, mode, counts);
+    STATUS_OK
+}
+
+#[no_mangle]
+/// Preserve the established packed-bit reset of ambiguous haploid genotypes.
+///
+/// # Safety
+///
+/// `variants` must be writable for the packed variant length and `reset_count`
+/// must be writable for one `u32`; the two outputs must not overlap.
+pub unsafe extern "C" fn shapeit_genotype_reset_haploid_hets_v1(
+    variants: *mut u8,
+    variants_length: usize,
+    variant_count: usize,
+    reset_count: *mut u32,
+) -> u32 {
+    if reset_count.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let required = match required_variant_bytes(variant_count) {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
+    if required > variants_length {
+        return STATUS_OUT_OF_BOUNDS;
+    }
+    if required != 0 && variants.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    match byte_ranges_overlap(
+        variants.cast_const(),
+        required,
+        reset_count.cast::<u8>().cast_const(),
+        core::mem::size_of::<u32>(),
+    ) {
+        Ok(true) => return STATUS_INVALID_DIMENSIONS,
+        Err(status) => return status,
+        Ok(false) => {}
+    }
+
+    let variants = if required == 0 {
+        &mut []
+    } else {
+        slice::from_raw_parts_mut(variants, required)
+    };
+    let mut count = 0u32;
+    for locus in 0..variant_count {
+        let code = variant_nibble(variants, locus);
+        if graph_code(code) > 1 {
+            set_variant_nibble(variants, locus, code | 1);
+            count = count.wrapping_add(1);
+        }
+    }
+    *reset_count = count;
+    STATUS_OK
+}
+
+#[no_mangle]
 /// Sample one complete genotype graph and update its packed haplotype alleles.
 ///
 /// RNG coordinates identify a fresh logical Philox stream. The function
@@ -1611,6 +1921,88 @@ mod tests {
                 MASK_INIT & MASK_UNFOLD0
             ]
         );
+    }
+
+    #[test]
+    fn pedigree_scaffolding_preserves_trio_and_duo_rules() {
+        let father = pack(&[12, 12, 6, 0, 12]);
+        let mother = pack(&[0, 6, 12, 12, 0]);
+        let mut child = pack(&[6, 10, 6, 12, 1]);
+        let mut counts = [0u32; 4];
+        let status = unsafe {
+            shapeit_genotype_pedigree_scaffold_v1(
+                child.as_mut_ptr(),
+                child.len(),
+                5,
+                father.as_ptr(),
+                father.len(),
+                mother.as_ptr(),
+                mother.len(),
+                0,
+                counts.as_mut_ptr(),
+                counts.len(),
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(child, pack(&[7, 7, 11, 12, 7]));
+        assert_eq!(counts, [1, 4, 3, 0]);
+
+        let parent = pack(&[0]);
+        let mut paternal = pack(&[6]);
+        let mut maternal = pack(&[6]);
+        let mut paternal_counts = [0u32; 4];
+        let mut maternal_counts = [0u32; 4];
+        let paternal_status = unsafe {
+            shapeit_genotype_pedigree_scaffold_v1(
+                paternal.as_mut_ptr(),
+                paternal.len(),
+                1,
+                parent.as_ptr(),
+                parent.len(),
+                core::ptr::null(),
+                0,
+                1,
+                paternal_counts.as_mut_ptr(),
+                paternal_counts.len(),
+            )
+        };
+        let maternal_status = unsafe {
+            shapeit_genotype_pedigree_scaffold_v1(
+                maternal.as_mut_ptr(),
+                maternal.len(),
+                1,
+                core::ptr::null(),
+                0,
+                parent.as_ptr(),
+                parent.len(),
+                2,
+                maternal_counts.as_mut_ptr(),
+                maternal_counts.len(),
+            )
+        };
+        assert_eq!(paternal_status, STATUS_OK);
+        assert_eq!(maternal_status, STATUS_OK);
+        assert_eq!(paternal, pack(&[11]));
+        assert_eq!(maternal, pack(&[7]));
+        assert_eq!(paternal_counts, [0, 1, 1, 0]);
+        assert_eq!(maternal_counts, [0, 1, 1, 0]);
+    }
+
+    #[test]
+    fn haploid_reset_preserves_existing_bitwise_missing_semantics() {
+        let mut variants = pack(&[2, 3, 0, 1]);
+        let mut reset_count = 0u32;
+        let status = unsafe {
+            shapeit_genotype_reset_haploid_hets_v1(
+                variants.as_mut_ptr(),
+                variants.len(),
+                4,
+                &mut reset_count,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(variants, pack(&[3, 3, 0, 1]));
+        assert_eq!(reset_count, 2);
     }
 
     #[test]

@@ -12,6 +12,10 @@
 #define SHAPEIT_GENOTYPE_STATUS_OUT_OF_BOUNDS 3U
 #define SHAPEIT_GENOTYPE_STATUS_INTEGER_OVERFLOW 4U
 
+#define SHAPEIT_GENOTYPE_PEDIGREE_TRIO 0U
+#define SHAPEIT_GENOTYPE_PEDIGREE_FATHER 1U
+#define SHAPEIT_GENOTYPE_PEDIGREE_MOTHER 2U
+
 typedef struct shapeit_genotype_window_v1 {
     int32_t start_locus;
     int32_t start_segment;
@@ -63,6 +67,24 @@ uint32_t shapeit_genotype_graph_build_v1(
     uint64_t * diplotypes,
     size_t diplotypes_length,
     uint32_t * transition_count);
+
+uint32_t shapeit_genotype_pedigree_scaffold_v1(
+    uint8_t * child_variants,
+    size_t child_variants_length,
+    size_t variant_count,
+    const uint8_t * father_variants,
+    size_t father_variants_length,
+    const uint8_t * mother_variants,
+    size_t mother_variants_length,
+    uint32_t pedigree_mode,
+    uint32_t * counts,
+    size_t counts_length);
+
+uint32_t shapeit_genotype_reset_haploid_hets_v1(
+    uint8_t * variants,
+    size_t variants_length,
+    size_t variant_count,
+    uint32_t * reset_count);
 
 uint32_t shapeit_genotype_sample_v1(
     uint8_t * variants,
