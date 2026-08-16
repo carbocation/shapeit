@@ -1092,7 +1092,7 @@ mod tests {
         let genotype = [0x20u8, 0x01];
         let genotypes: [&[u8]; 1] = [&genotype];
         let chunks = [0, 0, 0];
-        let scores = [0.0, 0.693_147_2, 1.098_612_3, 1.386_294_4];
+        let scores = [0.0f32, 2.0f32.ln(), 3.0f32.ln(), 4.0f32.ln()];
         unsafe {
             solve_chunk(SolveParameters {
                 haplotypes: haplotypes.as_mut_ptr(),
