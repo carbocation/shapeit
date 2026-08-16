@@ -24,6 +24,12 @@ struct FullTransposeLayout {
     target_stride: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct HetOverlapLayout {
+    offsets: [usize; 4],
+    byte_count: usize,
+}
+
 #[inline]
 fn padded_rows(row_count: usize) -> Option<usize> {
     row_count.checked_add(7).map(|count| count & !7)
@@ -129,6 +135,46 @@ fn validate_full_layout(
         max_rows,
         max_cols,
         target_stride,
+    })
+}
+
+fn validate_het_overlap_layout(
+    source_length: usize,
+    source_stride: usize,
+    individual0: usize,
+    individual1: usize,
+    start: usize,
+    stop: usize,
+) -> Result<HetOverlapLayout, u32> {
+    if source_stride == 0 || start > stop {
+        return Err(STATUS_INVALID_DIMENSIONS);
+    }
+    let byte_first = start >> 3;
+    let byte_last = stop >> 3;
+    if byte_last >= source_stride {
+        return Err(STATUS_OUT_OF_BOUNDS);
+    }
+    let byte_count = byte_last - byte_first + 1;
+    let row00 = individual0.checked_mul(2).ok_or(STATUS_INTEGER_OVERFLOW)?;
+    let row01 = row00.checked_add(1).ok_or(STATUS_INTEGER_OVERFLOW)?;
+    let row10 = individual1.checked_mul(2).ok_or(STATUS_INTEGER_OVERFLOW)?;
+    let row11 = row10.checked_add(1).ok_or(STATUS_INTEGER_OVERFLOW)?;
+    let mut offsets = [0usize; 4];
+    for (offset, row) in offsets.iter_mut().zip([row00, row01, row10, row11]) {
+        *offset = row
+            .checked_mul(source_stride)
+            .and_then(|value| value.checked_add(byte_first))
+            .ok_or(STATUS_INTEGER_OVERFLOW)?;
+        let end = offset
+            .checked_add(byte_count)
+            .ok_or(STATUS_INTEGER_OVERFLOW)?;
+        if end > source_length {
+            return Err(STATUS_OUT_OF_BOUNDS);
+        }
+    }
+    Ok(HetOverlapLayout {
+        offsets,
+        byte_count,
     })
 }
 
@@ -291,6 +337,74 @@ fn full_transpose(source: &[u8], target: &mut [u8], layout: FullTransposeLayout)
     full_transpose_portable(source, target, layout);
 }
 
+#[inline]
+fn overlap_from_counts(intersection: u32, union: u32) -> f32 {
+    if union == 0 {
+        0.0
+    } else {
+        union.wrapping_sub(intersection) as f32 / union as f32
+    }
+}
+
+fn het_overlap_portable(source: &[u8], layout: HetOverlapLayout) -> f32 {
+    let [offset00, offset01, offset10, offset11] = layout.offsets;
+    let mut intersection = 0u32;
+    let mut union = 0u32;
+    for byte in 0..layout.byte_count {
+        let het0 = source[offset00 + byte] ^ source[offset01 + byte];
+        let het1 = source[offset10 + byte] ^ source[offset11 + byte];
+        intersection = intersection.wrapping_add((het0 ^ het1).count_ones());
+        union = union.wrapping_add((het0 | het1).count_ones());
+    }
+    overlap_from_counts(intersection, union)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn popcnt_available() -> bool {
+    use core::arch::x86_64::__cpuid;
+
+    (__cpuid(1).ecx & (1 << 23)) != 0
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "popcnt")]
+unsafe fn het_overlap_popcnt(source: &[u8], layout: HetOverlapLayout) -> f32 {
+    let [offset00, offset01, offset10, offset11] = layout.offsets;
+    let mut intersection = 0u32;
+    let mut union = 0u32;
+    let mut byte = 0usize;
+    while byte + 8 <= layout.byte_count {
+        let word00 = core::ptr::read_unaligned(source.as_ptr().add(offset00 + byte).cast::<u64>());
+        let word01 = core::ptr::read_unaligned(source.as_ptr().add(offset01 + byte).cast::<u64>());
+        let word10 = core::ptr::read_unaligned(source.as_ptr().add(offset10 + byte).cast::<u64>());
+        let word11 = core::ptr::read_unaligned(source.as_ptr().add(offset11 + byte).cast::<u64>());
+        let het0 = word00 ^ word01;
+        let het1 = word10 ^ word11;
+        intersection = intersection.wrapping_add((het0 ^ het1).count_ones());
+        union = union.wrapping_add((het0 | het1).count_ones());
+        byte += 8;
+    }
+    while byte < layout.byte_count {
+        let het0 = *source.get_unchecked(offset00 + byte) ^ *source.get_unchecked(offset01 + byte);
+        let het1 = *source.get_unchecked(offset10 + byte) ^ *source.get_unchecked(offset11 + byte);
+        intersection = intersection.wrapping_add((het0 ^ het1).count_ones());
+        union = union.wrapping_add((het0 | het1).count_ones());
+        byte += 1;
+    }
+    overlap_from_counts(intersection, union)
+}
+
+fn het_overlap(source: &[u8], layout: HetOverlapLayout) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if popcnt_available() {
+        // SAFETY: CPUID establishes POPCNT support and layout validation covers
+        // every unaligned word and byte read.
+        return unsafe { het_overlap_popcnt(source, layout) };
+    }
+    het_overlap_portable(source, layout)
+}
+
 #[no_mangle]
 pub extern "C" fn shapeit_bitmatrix_abi_version() -> u32 {
     ABI_VERSION
@@ -389,6 +503,46 @@ pub unsafe extern "C" fn shapeit_bitmatrix_transpose_v1(
     STATUS_OK
 }
 
+#[no_mangle]
+/// Calculate the matching-heterozygote proportion for two diploid individuals.
+///
+/// The inclusive locus interval is deliberately rounded out to complete bytes,
+/// matching the established common-phasing calculation.
+///
+/// # Safety
+///
+/// `source` must be readable for `source_length` bytes and `overlap` must be
+/// writable. Invalid dimensions and indexes are reported without writing the
+/// output.
+pub unsafe extern "C" fn shapeit_bitmatrix_het_overlap_v1(
+    source: *const u8,
+    source_length: usize,
+    source_stride: usize,
+    individual0: usize,
+    individual1: usize,
+    start: usize,
+    stop: usize,
+    overlap: *mut f32,
+) -> u32 {
+    if source.is_null() || overlap.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let layout = match validate_het_overlap_layout(
+        source_length,
+        source_stride,
+        individual0,
+        individual1,
+        start,
+        stop,
+    ) {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
+    let source = slice::from_raw_parts(source, source_length);
+    *overlap = het_overlap(source, layout);
+    STATUS_OK
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,6 +592,33 @@ mod tests {
             }
         }
         target
+    }
+
+    fn reference_het_overlap(
+        source: &[u8],
+        source_stride: usize,
+        individual0: usize,
+        individual1: usize,
+        start: usize,
+        stop: usize,
+    ) -> f32 {
+        let first = start >> 3;
+        let count = (stop >> 3) - first + 1;
+        let offsets = [
+            2 * individual0 * source_stride + first,
+            (2 * individual0 + 1) * source_stride + first,
+            2 * individual1 * source_stride + first,
+            (2 * individual1 + 1) * source_stride + first,
+        ];
+        let mut intersection = 0u32;
+        let mut union = 0u32;
+        for byte in 0..count {
+            let het0 = source[offsets[0] + byte] ^ source[offsets[1] + byte];
+            let het1 = source[offsets[2] + byte] ^ source[offsets[3] + byte];
+            intersection += (het0 ^ het1).count_ones();
+            union += (het0 | het1).count_ones();
+        }
+        overlap_from_counts(intersection, union)
     }
 
     #[test]
@@ -517,6 +698,84 @@ mod tests {
             assert_eq!(status, STATUS_OK);
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn het_overlap_matches_byte_reference_across_word_boundaries() {
+        const INDIVIDUALS: usize = 6;
+        for source_stride in [1usize, 7, 8, 9, 33] {
+            let source: Vec<u8> = (0..2 * INDIVIDUALS * source_stride)
+                .map(|index| (index as u8).wrapping_mul(73).wrapping_add(41))
+                .collect();
+            let final_bit = source_stride * 8 - 1;
+            for (individual0, individual1) in [(0, 1), (2, 5), (4, 4)] {
+                for (start, stop) in [
+                    (0, 0),
+                    (1, core::cmp::min(7, final_bit)),
+                    (3, core::cmp::min(8, final_bit)),
+                    (0, final_bit),
+                ] {
+                    let expected = reference_het_overlap(
+                        &source,
+                        source_stride,
+                        individual0,
+                        individual1,
+                        start,
+                        stop,
+                    );
+                    let mut actual = -1.0f32;
+                    let status = unsafe {
+                        shapeit_bitmatrix_het_overlap_v1(
+                            source.as_ptr(),
+                            source.len(),
+                            source_stride,
+                            individual0,
+                            individual1,
+                            start,
+                            stop,
+                            &mut actual,
+                        )
+                    };
+                    assert_eq!(status, STATUS_OK);
+                    assert_eq!(actual.to_bits(), expected.to_bits());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn het_overlap_rejects_bad_layout_without_writing() {
+        let source = [0u8; 16];
+        let mut overlap = 3.25f32;
+        let status = unsafe {
+            shapeit_bitmatrix_het_overlap_v1(
+                source.as_ptr(),
+                source.len(),
+                2,
+                0,
+                4,
+                0,
+                15,
+                &mut overlap,
+            )
+        };
+        assert_eq!(status, STATUS_OUT_OF_BOUNDS);
+        assert_eq!(overlap, 3.25);
+
+        let status = unsafe {
+            shapeit_bitmatrix_het_overlap_v1(
+                source.as_ptr(),
+                source.len(),
+                2,
+                0,
+                1,
+                9,
+                8,
+                &mut overlap,
+            )
+        };
+        assert_eq!(status, STATUS_INVALID_DIMENSIONS);
+        assert_eq!(overlap, 3.25);
     }
 
     #[test]

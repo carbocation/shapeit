@@ -16,6 +16,11 @@ index bounds, and integer arithmetic before writing caller-owned output. On
 x86-64 both operations perform runtime BMI2 detection and use tiled `PEXT`
 kernels; other targets use portable byte-exact implementations.
 
+`shapeit_bitmatrix_het_overlap_v1` computes the matching-heterozygote score
+used for common-phasing IBD2 protection. It preserves the established inclusive
+whole-byte interval and floating-point formula, while processing eight bytes at
+a time with hardware POPCNT when available.
+
 ## Common HMM window
 
 `shapeit_hmm_run_segment_double_v1` owns the complete double-precision fallback.

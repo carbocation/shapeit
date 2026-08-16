@@ -41,6 +41,16 @@ uint32_t shapeit_bitmatrix_transpose_v1(
     size_t target_length,
     size_t target_stride);
 
+uint32_t shapeit_bitmatrix_het_overlap_v1(
+    const uint8_t * source,
+    size_t source_length,
+    size_t source_stride,
+    size_t individual0,
+    size_t individual1,
+    size_t start,
+    size_t stop,
+    float * overlap);
+
 #ifdef __cplusplus
 }
 #endif
