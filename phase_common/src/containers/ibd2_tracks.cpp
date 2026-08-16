@@ -21,7 +21,6 @@
  ******************************************************************************/
 
 #include <containers/ibd2_tracks.h>
-#include <shapeit_conditioning.h>
 
 #include <cstdint>
 #include <stdexcept>
@@ -55,14 +54,6 @@ void ibd2_tracks::initialize(int n_ind, variant_map & V) {
 	}
 }
 
-void ibd2_tracks::pushIBD2(int ind, const shapeit_conditioning_job_v1 * job) {
-	const uint32_t status = shapeit_conditioning_job_push_tracks_v1(job, Handle, ind);
-	if (status != SHAPEIT_IBD2_STATUS_OK) {
-		throw runtime_error("Rust IBD2 registry rejected detected tracks (status " +
-			to_string(status) + ")");
-	}
-}
-
 void ibd2_tracks::collapse() {
 	tac.clock();
 	shapeit_ibd2_stats_v1 stats = {};
@@ -75,5 +66,4 @@ void ibd2_tracks::collapse() {
 		" / #tracks=" + stb.str(stats.tracks) + " / #merged = " +
 		stb.str(stats.merged) + "]");
 }
-
 

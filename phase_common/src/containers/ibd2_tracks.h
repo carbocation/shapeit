@@ -28,8 +28,6 @@
 
 #include <containers/variant_map.h>
 
-struct shapeit_conditioning_job_v1;
-
 class ibd2_tracks {
 public:
 	shapeit_ibd2_tracks_v1 * Handle;
@@ -40,7 +38,6 @@ public:
 	ibd2_tracks & operator=(const ibd2_tracks &) = delete;
 	void clear();
 	void initialize(int, variant_map &);
-	void pushIBD2(int, const shapeit_conditioning_job_v1 *);
 	void collapse();
 };
 

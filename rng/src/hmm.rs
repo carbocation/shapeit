@@ -1,6 +1,10 @@
 #![allow(clippy::needless_range_loop)]
 
 use core::{mem, slice};
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::thread;
 
 use self::single::{shapeit_hmm_run_segment_single_prevalidated_v1, HmmSegmentSingleV1};
 use crate::bitmatrix::shapeit_bitmatrix_subset_transpose_v1;
@@ -11,6 +15,7 @@ use crate::genotype::{
     shapeit_genotype_graph_prune_v1, shapeit_genotype_graph_sample_current_v1,
     shapeit_genotype_graph_store_v1, GenotypeGraphV1, GenotypeWindowV1,
 };
+use crate::ibd2::Ibd2TracksV1;
 
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{
@@ -24,6 +29,7 @@ const STATUS_NULL_POINTER: u32 = 1;
 const STATUS_INVALID_DIMENSIONS: u32 = 2;
 const STATUS_OUT_OF_BOUNDS: u32 = 3;
 const STATUS_INTEGER_OVERFLOW: u32 = 4;
+const STATUS_THREAD_FAILURE: u32 = 6;
 const HAPLOTYPES: usize = 8;
 const STAGE_BURN: u32 = 0;
 const STAGE_PRUNE: u32 = 1;
@@ -145,11 +151,164 @@ pub struct HmmPhaseJobV1 {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct CommonPhaseJobV1 {
     abi_version: u32,
     struct_size: usize,
     conditioning: ConditioningGraphBuildV1,
     phase: HmmPhaseJobV1,
+}
+
+pub type CommonProgressV1 = unsafe extern "C" fn(usize, usize, *mut c_void);
+
+#[repr(C)]
+pub struct CommonIterationV1 {
+    abi_version: u32,
+    struct_size: usize,
+    sample_template: CommonPhaseJobV1,
+    base_pair_positions: *const i32,
+    base_pair_positions_length: usize,
+    ibd2_registry: *mut Ibd2TracksV1,
+    progress: Option<CommonProgressV1>,
+    progress_context: *mut c_void,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CommonIterationResultV1 {
+    underflow_recovered_summing: u64,
+    underflow_recovered_precision: u64,
+    fatal_outcome: i32,
+    failed_sample: usize,
+    windows: usize,
+    conditioning_states_mean: f64,
+    conditioning_states_sd: f64,
+    window_megabases_mean: f64,
+    window_megabases_sd: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CommonFallbackV1 {
+    sample: usize,
+    window: usize,
+    states: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct CommonStats {
+    count: usize,
+    sum: f64,
+    sum_squares: f64,
+}
+
+impl CommonStats {
+    #[inline]
+    fn push(&mut self, value: f64) {
+        self.count += 1;
+        self.sum += value;
+        self.sum_squares += value * value;
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.count += other.count;
+        self.sum += other.sum;
+        self.sum_squares += other.sum_squares;
+    }
+
+    fn mean(self) -> f64 {
+        if self.count == 0 {
+            0.0
+        } else {
+            self.sum / self.count as f64
+        }
+    }
+
+    fn standard_deviation(self) -> f64 {
+        if self.count < 2 {
+            return 0.0;
+        }
+        let count = self.count as f64;
+        let variance = (self.sum_squares - self.sum * self.sum / count) / (count - 1.0);
+        variance.max(0.0).sqrt()
+    }
+}
+
+#[derive(Default)]
+struct CommonWorkerIteration {
+    underflow_recovered_summing: u64,
+    underflow_recovered_precision: u64,
+    conditioning_states: CommonStats,
+    window_megabases: CommonStats,
+    fallbacks: Vec<CommonFallbackV1>,
+}
+
+struct CommonWorkerV1 {
+    conditioning_job: *mut ConditioningJobV1,
+    iteration: CommonWorkerIteration,
+}
+
+// The worker exclusively owns this allocation and is borrowed by at most one
+// scoped execution thread at a time.
+unsafe impl Send for CommonWorkerV1 {}
+
+impl CommonWorkerV1 {
+    fn new() -> Self {
+        Self {
+            conditioning_job: Box::into_raw(Box::new(ConditioningJobV1::default())),
+            iteration: CommonWorkerIteration::default(),
+        }
+    }
+
+    fn reset_iteration(&mut self) {
+        self.iteration.underflow_recovered_summing = 0;
+        self.iteration.underflow_recovered_precision = 0;
+        self.iteration.conditioning_states = CommonStats::default();
+        self.iteration.window_megabases = CommonStats::default();
+        self.iteration.fallbacks.clear();
+    }
+}
+
+impl Drop for CommonWorkerV1 {
+    fn drop(&mut self) {
+        if !self.conditioning_job.is_null() {
+            unsafe {
+                drop(Box::from_raw(self.conditioning_job));
+            }
+            self.conditioning_job = core::ptr::null_mut();
+        }
+    }
+}
+
+pub struct CommonWorkersV1 {
+    workers: Vec<CommonWorkerV1>,
+    graph_addresses: Vec<usize>,
+    haploid_individuals: Vec<u8>,
+    variant_count: usize,
+    fallbacks: Vec<CommonFallbackV1>,
+}
+
+#[derive(Clone, Copy)]
+struct SharedCommonTemplate(CommonPhaseJobV1);
+
+// Every pointer in the template addresses immutable iteration input. Mutable
+// graph and worker-job pointers are installed into a private copy per sample.
+unsafe impl Sync for SharedCommonTemplate {}
+
+struct CommonIterationShared<'a> {
+    template: SharedCommonTemplate,
+    graph_addresses: &'a [usize],
+    haploid_individuals: &'a [u8],
+    base_pair_positions: &'a [i32],
+    ibd2_registry_address: usize,
+    progress: Option<CommonProgressV1>,
+    progress_context_address: usize,
+    next_sample: AtomicUsize,
+    completed_samples: AtomicUsize,
+    status: AtomicU32,
+    failed_sample: AtomicUsize,
+    fatal_outcome: AtomicI32,
+    serialized_output: Mutex<()>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1756,6 +1915,392 @@ pub unsafe extern "C" fn shapeit_common_phase_job_run_v1(
     let mut phase = parameters.phase;
     phase.conditioning_job = *job;
     shapeit_hmm_run_phase_job_v1(&phase, result)
+}
+
+fn record_common_failure(shared: &CommonIterationShared<'_>, status: u32, sample: usize) {
+    if shared
+        .status
+        .compare_exchange(STATUS_OK, status, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        shared.failed_sample.store(sample, Ordering::SeqCst);
+    }
+}
+
+fn run_common_worker(worker: &mut CommonWorkerV1, shared: &CommonIterationShared<'_>) {
+    worker.reset_iteration();
+    loop {
+        if shared.status.load(Ordering::SeqCst) != STATUS_OK
+            || shared.fatal_outcome.load(Ordering::SeqCst) != 0
+        {
+            break;
+        }
+        let sample = shared.next_sample.fetch_add(1, Ordering::SeqCst);
+        if sample >= shared.graph_addresses.len() {
+            break;
+        }
+
+        let mut parameters = shared.template.0;
+        let graph = shared.graph_addresses[sample] as *mut GenotypeGraphV1;
+        parameters.conditioning.graph = graph;
+        parameters.conditioning.target_individual = sample;
+        parameters.conditioning.target_individual_count = shared.graph_addresses.len();
+        parameters.conditioning.haploid_individuals = shared.haploid_individuals.as_ptr();
+        parameters.conditioning.haploid_individuals_length = shared.haploid_individuals.len();
+        parameters.conditioning.window_item = sample as u64;
+        parameters.conditioning.fallback_item = sample as u64;
+        parameters.phase.graph = graph;
+        parameters.phase.conditioning_job = core::ptr::null_mut();
+        parameters.phase.sample_item = sample as u64;
+
+        let mut job_result = HmmJobResultV1::default();
+        let status = unsafe {
+            shapeit_common_phase_job_run_v1(
+                &parameters,
+                &mut worker.conditioning_job,
+                &mut job_result,
+            )
+        };
+        if status != STATUS_OK {
+            record_common_failure(shared, status, sample);
+            break;
+        }
+        if job_result.fatal_outcome != 0 {
+            if shared
+                .fatal_outcome
+                .compare_exchange(
+                    0,
+                    job_result.fatal_outcome,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+            {
+                shared.failed_sample.store(sample, Ordering::SeqCst);
+            }
+            break;
+        }
+
+        worker.iteration.underflow_recovered_summing +=
+            job_result.underflow_recovered_summing as u64;
+        worker.iteration.underflow_recovered_precision +=
+            u64::from(job_result.underflow_recovered_precision);
+        let conditioning = unsafe { &*worker.conditioning_job };
+        for (window_index, ((window, states), &used_fallback)) in conditioning
+            .windows
+            .iter()
+            .zip(conditioning.states.iter())
+            .zip(conditioning.used_fallback.iter())
+            .enumerate()
+        {
+            let start_locus = match usize::try_from(window.start_locus) {
+                Ok(value) => value,
+                Err(_) => {
+                    record_common_failure(shared, STATUS_OUT_OF_BOUNDS, sample);
+                    return;
+                }
+            };
+            let stop_locus = match usize::try_from(window.stop_locus) {
+                Ok(value) => value,
+                Err(_) => {
+                    record_common_failure(shared, STATUS_OUT_OF_BOUNDS, sample);
+                    return;
+                }
+            };
+            if start_locus > stop_locus || stop_locus >= shared.base_pair_positions.len() {
+                record_common_failure(shared, STATUS_OUT_OF_BOUNDS, sample);
+                return;
+            }
+            worker
+                .iteration
+                .conditioning_states
+                .push(states.len() as f64);
+            let width = i64::from(shared.base_pair_positions[stop_locus])
+                - i64::from(shared.base_pair_positions[start_locus]);
+            worker
+                .iteration
+                .window_megabases
+                .push(width as f64 * 1.0e-6);
+            if used_fallback {
+                worker.iteration.fallbacks.push(CommonFallbackV1 {
+                    sample,
+                    window: window_index,
+                    states: states.len(),
+                });
+            }
+        }
+
+        {
+            let _guard = match shared.serialized_output.lock() {
+                Ok(value) => value,
+                Err(_) => {
+                    record_common_failure(shared, STATUS_THREAD_FAILURE, sample);
+                    return;
+                }
+            };
+            let registry = unsafe { &mut *(shared.ibd2_registry_address as *mut Ibd2TracksV1) };
+            if let Err(status) = registry.push(sample, &conditioning.tracks) {
+                record_common_failure(shared, status, sample);
+                return;
+            }
+            let completed = shared.completed_samples.fetch_add(1, Ordering::SeqCst) + 1;
+            if let Some(progress) = shared.progress {
+                unsafe {
+                    progress(
+                        completed,
+                        shared.graph_addresses.len(),
+                        shared.progress_context_address as *mut c_void,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[no_mangle]
+/// Create a persistent common-phase worker pool and copy its stable graph and
+/// ploidy table. Per-worker conditioning and HMM workspaces are retained across
+/// every iteration run.
+///
+/// # Safety
+///
+/// Every graph must remain live until the pool is freed. `graphs`,
+/// `haploid_individuals`, and `workers` must be valid for their stated access.
+pub unsafe extern "C" fn shapeit_common_workers_create_v1(
+    worker_count: usize,
+    graphs: *const *mut GenotypeGraphV1,
+    graph_count: usize,
+    haploid_individuals: *const u8,
+    haploid_individuals_length: usize,
+    workers: *mut *mut CommonWorkersV1,
+) -> u32 {
+    if workers.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    if worker_count == 0 || graph_count == 0 || haploid_individuals_length != graph_count {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    if let Err(status) = require_const_pointer(graphs, graph_count) {
+        return status;
+    }
+    if let Err(status) = require_const_pointer(haploid_individuals, haploid_individuals_length) {
+        return status;
+    }
+    let graphs = const_slice(graphs, graph_count);
+    let haploid_individuals = const_slice(haploid_individuals, haploid_individuals_length);
+    if haploid_individuals.iter().any(|&value| value > 1) {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    let mut graph_addresses = Vec::with_capacity(graph_count);
+    let mut variant_count = None;
+    for &graph in graphs {
+        if graph.is_null() {
+            return STATUS_NULL_POINTER;
+        }
+        let graph_ref = &*graph;
+        if !graph_ref.is_built() {
+            return STATUS_INVALID_DIMENSIONS;
+        }
+        let current_variant_count = graph_ref.hmm_dimensions().0;
+        if variant_count.is_some_and(|expected| expected != current_variant_count) {
+            return STATUS_INVALID_DIMENSIONS;
+        }
+        variant_count = Some(current_variant_count);
+        graph_addresses.push(graph as usize);
+    }
+    let worker_count = core::cmp::min(worker_count, graph_count);
+    let value = CommonWorkersV1 {
+        workers: (0..worker_count).map(|_| CommonWorkerV1::new()).collect(),
+        graph_addresses,
+        haploid_individuals: haploid_individuals.to_vec(),
+        variant_count: variant_count.unwrap_or(0),
+        fallbacks: Vec::new(),
+    };
+    *workers = Box::into_raw(Box::new(value));
+    STATUS_OK
+}
+
+#[no_mangle]
+/// Free a common-phase worker pool. Null is accepted.
+///
+/// # Safety
+///
+/// `workers` must be null or a live pool returned by the create function, and
+/// it must be freed at most once after all iteration calls have returned.
+pub unsafe extern "C" fn shapeit_common_workers_free_v1(workers: *mut CommonWorkersV1) {
+    if !workers.is_null() {
+        drop(Box::from_raw(workers));
+    }
+}
+
+#[no_mangle]
+/// Schedule and run a complete common-phasing iteration in Rust.
+///
+/// Each graph is mutably accessed by exactly one scoped worker. Shared PBWT,
+/// haplotype, map, and model buffers are read-only for the duration of the
+/// call. Detected IBD2 tracks and progress callbacks are serialized.
+///
+/// # Safety
+///
+/// `workers`, `parameters`, and `result` must be valid and exclusively used by
+/// this call. All buffers in the sample template must remain live and immutable
+/// until the call returns. The IBD2 registry must be live and must describe the
+/// same target individuals as the worker pool.
+pub unsafe extern "C" fn shapeit_common_workers_run_iteration_v1(
+    workers: *mut CommonWorkersV1,
+    parameters: *const CommonIterationV1,
+    result: *mut CommonIterationResultV1,
+) -> u32 {
+    if workers.is_null() || parameters.is_null() || result.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let workers = &mut *workers;
+    let parameters = &*parameters;
+    if parameters.abi_version != ABI_VERSION
+        || parameters.struct_size < mem::size_of::<CommonIterationV1>()
+        || parameters.sample_template.abi_version != ABI_VERSION
+        || parameters.sample_template.struct_size < mem::size_of::<CommonPhaseJobV1>()
+        || parameters.ibd2_registry.is_null()
+    {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    if let Err(status) = require_const_pointer(
+        parameters.base_pair_positions,
+        parameters.base_pair_positions_length,
+    ) {
+        return status;
+    }
+    if parameters.base_pair_positions_length < workers.variant_count
+        || (*parameters.ibd2_registry).individual_count() != workers.graph_addresses.len()
+    {
+        return STATUS_OUT_OF_BOUNDS;
+    }
+    let base_pair_positions = const_slice(
+        parameters.base_pair_positions,
+        parameters.base_pair_positions_length,
+    );
+    let shared = CommonIterationShared {
+        template: SharedCommonTemplate(parameters.sample_template),
+        graph_addresses: &workers.graph_addresses,
+        haploid_individuals: &workers.haploid_individuals,
+        base_pair_positions,
+        ibd2_registry_address: parameters.ibd2_registry as usize,
+        progress: parameters.progress,
+        progress_context_address: parameters.progress_context as usize,
+        next_sample: AtomicUsize::new(0),
+        completed_samples: AtomicUsize::new(0),
+        status: AtomicU32::new(STATUS_OK),
+        failed_sample: AtomicUsize::new(usize::MAX),
+        fatal_outcome: AtomicI32::new(0),
+        serialized_output: Mutex::new(()),
+    };
+
+    if workers.workers.len() == 1 {
+        run_common_worker(&mut workers.workers[0], &shared);
+    } else {
+        thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(workers.workers.len());
+            for worker in &mut workers.workers {
+                let shared = &shared;
+                match thread::Builder::new().spawn_scoped(scope, move || {
+                    run_common_worker(worker, shared);
+                }) {
+                    Ok(handle) => handles.push(handle),
+                    Err(_) => record_common_failure(shared, STATUS_THREAD_FAILURE, usize::MAX),
+                }
+            }
+            for handle in handles {
+                if handle.join().is_err() {
+                    record_common_failure(&shared, STATUS_THREAD_FAILURE, usize::MAX);
+                }
+            }
+        });
+    }
+
+    let mut conditioning_states = CommonStats::default();
+    let mut window_megabases = CommonStats::default();
+    let mut underflow_recovered_summing = 0u64;
+    let mut underflow_recovered_precision = 0u64;
+    workers.fallbacks.clear();
+    for worker in &workers.workers {
+        underflow_recovered_summing = match underflow_recovered_summing
+            .checked_add(worker.iteration.underflow_recovered_summing)
+        {
+            Some(value) => value,
+            None => {
+                record_common_failure(&shared, STATUS_INTEGER_OVERFLOW, usize::MAX);
+                0
+            }
+        };
+        underflow_recovered_precision = match underflow_recovered_precision
+            .checked_add(worker.iteration.underflow_recovered_precision)
+        {
+            Some(value) => value,
+            None => {
+                record_common_failure(&shared, STATUS_INTEGER_OVERFLOW, usize::MAX);
+                0
+            }
+        };
+        conditioning_states.merge(worker.iteration.conditioning_states);
+        window_megabases.merge(worker.iteration.window_megabases);
+        workers
+            .fallbacks
+            .extend(worker.iteration.fallbacks.iter().copied());
+    }
+    workers
+        .fallbacks
+        .sort_unstable_by_key(|fallback| (fallback.sample, fallback.window));
+
+    *result = CommonIterationResultV1 {
+        underflow_recovered_summing,
+        underflow_recovered_precision,
+        fatal_outcome: shared.fatal_outcome.load(Ordering::SeqCst),
+        failed_sample: shared.failed_sample.load(Ordering::SeqCst),
+        windows: conditioning_states.count,
+        conditioning_states_mean: conditioning_states.mean(),
+        conditioning_states_sd: conditioning_states.standard_deviation(),
+        window_megabases_mean: window_megabases.mean(),
+        window_megabases_sd: window_megabases.standard_deviation(),
+    };
+    shared.status.load(Ordering::SeqCst)
+}
+
+#[no_mangle]
+/// Return the number of fallback events retained by the most recent iteration.
+///
+/// # Safety
+///
+/// `workers` must be null or point to a live, idle worker pool.
+pub unsafe extern "C" fn shapeit_common_workers_fallback_count_v1(
+    workers: *const CommonWorkersV1,
+) -> usize {
+    if workers.is_null() {
+        0
+    } else {
+        (*workers).fallbacks.len()
+    }
+}
+
+#[no_mangle]
+/// Borrow one fallback event from the most recent iteration.
+///
+/// # Safety
+///
+/// `workers` and `fallback` must be valid and the pool must be idle.
+pub unsafe extern "C" fn shapeit_common_workers_fallback_v1(
+    workers: *const CommonWorkersV1,
+    index: usize,
+    fallback: *mut CommonFallbackV1,
+) -> u32 {
+    if workers.is_null() || fallback.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let workers = &*workers;
+    if index >= workers.fallbacks.len() {
+        return STATUS_OUT_OF_BOUNDS;
+    }
+    *fallback = workers.fallbacks[index];
+    STATUS_OK
 }
 
 #[no_mangle]

@@ -114,10 +114,17 @@ buffers or calls separate sampling, pruning, and storage bridges per sample.
 
 `shapeit_common_phase_job_run_v1` is the production per-sample boundary. One
 call rebuilds the conditioning job from the graph, runs every HMM window, and
-executes the requested MCMC stage. C++ retains iteration scheduling, progress
-reporting, and error presentation. Window statistics are borrowed afterward,
+executes the requested MCMC stage. Window statistics are borrowed afterward,
 and detected IBD2 tracks are appended directly from the conditioning job to the
 Rust registry without a C++ mirror or element-by-element copy.
+
+`shapeit_common_workers_create_v1` owns persistent per-worker conditioning and
+HMM workspaces. `shapeit_common_workers_run_iteration_v1` dynamically schedules
+all target samples on scoped Rust threads, derives each logical RNG stream from
+the sample index, aggregates window statistics and fallback diagnostics, and
+serializes direct IBD2-registry updates and progress callbacks. C++ now retains
+iteration-stage orchestration, PBWT refresh, reporting, and I/O, but no longer
+owns common-phase sample threads or per-worker compute objects.
 
 ## IBD2 registry
 

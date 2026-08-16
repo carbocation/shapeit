@@ -21,15 +21,19 @@
  ******************************************************************************/
 
 #include <phaser/phaser_header.h>
+#include <shapeit_common.h>
 
 using namespace std;
 
 phaser::phaser() {
+	phase_workers = nullptr;
 }
 
 phaser::~phaser() {
-	id_workers.clear();
-	threadData.clear();
+	if (phase_workers != nullptr) {
+		shapeit_common_workers_free_v1(phase_workers);
+		phase_workers = nullptr;
+	}
 	iteration_types.clear();
 	iteration_counts.clear();
 }
@@ -78,4 +82,3 @@ string phaser::get_iteration_scheme() {
 	str += "]";
 	return str;
 }
-

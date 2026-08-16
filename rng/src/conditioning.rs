@@ -102,8 +102,8 @@ pub type ConditioningTrackV1 = Ibd2TrackV1;
 pub struct ConditioningJobV1 {
     pub(crate) windows: Vec<GenotypeWindowV1>,
     pub(crate) states: Vec<Vec<u32>>,
-    tracks: Vec<ConditioningTrackV1>,
-    used_fallback: Vec<bool>,
+    pub(crate) tracks: Vec<ConditioningTrackV1>,
+    pub(crate) used_fallback: Vec<bool>,
     seen: Vec<u32>,
     seen_epoch: u32,
     ordering: Vec<u32>,

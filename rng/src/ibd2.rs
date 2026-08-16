@@ -92,7 +92,11 @@ impl Ibd2TracksV1 {
         track
     }
 
-    fn push(&mut self, source_individual: usize, input: &[Ibd2TrackV1]) -> Result<(), u32> {
+    pub(crate) fn push(
+        &mut self,
+        source_individual: usize,
+        input: &[Ibd2TrackV1],
+    ) -> Result<(), u32> {
         if source_individual >= self.tracks.len() {
             return Err(STATUS_OUT_OF_BOUNDS);
         }

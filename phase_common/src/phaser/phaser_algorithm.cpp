@@ -21,85 +21,121 @@
  ******************************************************************************/
 
 #include <phaser/phaser_header.h>
+#include <shapeit_common.h>
 
 using namespace std;
 
-void * phaseWindow_callback(void * ptr) {
-	phaser * S = static_cast< phaser * >( ptr );
-	int id_worker, id_job;
-	pthread_mutex_lock(&S->mutex_workers);
-	id_worker = S->i_workers ++;
-	pthread_mutex_unlock(&S->mutex_workers);
-	for(;;) {
-		pthread_mutex_lock(&S->mutex_workers);
-		id_job = S->i_jobs ++;
-		if (id_job <= S->G.n_ind) vrb.progress("  * HMM computations", id_job*1.0/S->G.n_ind);
-		pthread_mutex_unlock(&S->mutex_workers);
-		if (id_job < S->G.n_ind) S->phaseWindow(id_worker, id_job);
-		else pthread_exit(NULL);
-	}
-}
-
-void phaser::phaseWindow(int id_worker, int id_job) {
-	random_number_generator window_rng = rng.fork(RNG_DOMAIN_PHASE_COMMON_WINDOW, iteration_index, id_job);
-	random_number_generator sample_rng = rng.fork(RNG_DOMAIN_PHASE_COMMON_MCMC, iteration_index, id_job);
-	random_number_generator fallback_rng = rng.fork(RNG_DOMAIN_PHASE_COMMON_FALLBACK, iteration_index, id_job);
-	int underflow_recovered_summing = 0;
-	int underflow_recovered_precision = 0;
-
-	//Build conditioning state and run the complete sample job in Rust
-	const int outcome = threadData[id_worker].run(
-		id_job, G.vecG[id_job], M, options["hmm-window"].as < double > (),
-		iteration_types[iteration_stage], options["mcmc-prune"].as < double > (),
-		window_rng, fallback_rng, sample_rng,
-		underflow_recovered_summing, underflow_recovered_precision);
-	switch (outcome) {
-	case -2: vrb.error("Diploid underflow impossible to recover for [" + G.vecG[id_job]->name + "]");
-	case -1: vrb.error("Haploid underflow impossible to recover for [" + G.vecG[id_job]->name + "]");
-	}
-
-	//Collect reporting-only window statistics
-	for (size_t w = 0 ; w < threadData[id_worker].size() ; w ++) {
-		int start_locus = 0, stop_locus = 0;
-		size_t states_length = 0;
-		bool used_fallback = false;
-		threadData[id_worker].windowStats(
-			w, start_locus, stop_locus, states_length, used_fallback);
-		if (used_fallback) {
-			vrb.warning("No PBWT states found [" + G.vecG[id_job]->name + " / w=" +
-				stb.str(w) + "] / Using " + stb.str(states_length) + " random states");
-		}
-		if (options["thread"].as < int > () > 1) pthread_mutex_lock(&mutex_workers);
-		statH.push(states_length*1.0);
-		statS.push((V.vec_pos[stop_locus]->bp - V.vec_pos[start_locus]->bp) * 1.0e-6);
-		if (options["thread"].as < int > () > 1) pthread_mutex_unlock(&mutex_workers);
-	}
-
-	//Copy over new IBD2 constraints into H
-	if (options["thread"].as < int > () > 1) pthread_mutex_lock(&mutex_workers);
-	n_underflow_recovered_summing += underflow_recovered_summing;
-	n_underflow_recovered_precision += underflow_recovered_precision;
-	H.Kbanned.pushIBD2(id_job, threadData[id_worker].Conditioning);
-	if (options["thread"].as < int > () > 1) pthread_mutex_unlock(&mutex_workers);
-
+extern "C" void shapeit_common_progress_callback(
+	size_t completed, size_t total, void *) {
+	if (total > 0) vrb.progress("  * HMM computations", completed * 1.0 / total);
 }
 
 void phaser::phaseWindow() {
 	tac.clock();
-	int n_thread = options["thread"].as < int > ();
-	n_underflow_recovered_summing = 0;
-	n_underflow_recovered_precision = 0;
-	i_workers = 0; i_jobs = 0;
-	statH.clear(); statS.clear();
-	storedKsizes.clear();
-	if (n_thread > 1) {
-		for (int t = 0 ; t < n_thread ; t++) pthread_create( &id_workers[t] , NULL, phaseWindow_callback, static_cast<void *>(this));
-		for (int t = 0 ; t < n_thread ; t++) pthread_join( id_workers[t] , NULL);
-	} else for (int i = 0 ; i < G.n_ind ; i ++) {
-		phaseWindow(0, i);
-		vrb.progress("  * HMM computations", (i+1)*1.0/G.n_ind);
+	vrb.progress("  * HMM computations", 0.0);
+
+	shapeit_common_iteration_v1 parameters = {};
+	parameters.abi_version = SHAPEIT_COMMON_ABI_VERSION;
+	parameters.struct_size = sizeof(parameters);
+	parameters.base_pair_positions = M.bp.data();
+	parameters.base_pair_positions_length = M.bp.size();
+	parameters.ibd2_registry = H.Kbanned.Handle;
+	parameters.progress = shapeit_common_progress_callback;
+
+	shapeit_common_phase_job_v1 & sample = parameters.sample_template;
+	sample.abi_version = SHAPEIT_COMMON_ABI_VERSION;
+	sample.struct_size = sizeof(sample);
+
+	shapeit_conditioning_graph_build_v1 & conditioning = sample.conditioning;
+	conditioning.abi_version = SHAPEIT_CONDITIONING_ABI_VERSION;
+	conditioning.struct_size = sizeof(conditioning);
+	conditioning.centimorgans = M.cm_double.data();
+	conditioning.centimorgans_length = M.cm_double.size();
+	conditioning.minimum_window_centimorgans = options["hmm-window"].as < double > ();
+	conditioning.selected_sites = H.sites_pbwt_selection.data();
+	conditioning.selected_sites_length = H.sites_pbwt_selection.size();
+	conditioning.site_grouping = reinterpret_cast<const int32_t *>(H.sites_pbwt_grouping.data());
+	conditioning.site_grouping_length = H.sites_pbwt_grouping.size();
+	conditioning.pbwt_neighbors = reinterpret_cast<const int32_t *>(H.indexes_pbwt_neighbour.data());
+	conditioning.pbwt_neighbors_length = H.indexes_pbwt_neighbour.size();
+	conditioning.pbwt_depth = H.depth;
+	conditioning.pbwt_group_count = H.sites_pbwt_ngroups;
+	conditioning.haplotype_count = H.n_hap;
+	conditioning.haplotypes = H.H_opt_hap.bytes;
+	conditioning.haplotypes_length = H.H_opt_hap.n_bytes;
+	conditioning.haplotype_stride = H.H_opt_hap.n_cols >> 3;
+	conditioning.maximum_heterozygote_mismatch = 0.75f;
+	conditioning.window_seed = rng.getSeed();
+	conditioning.window_domain = RNG_DOMAIN_PHASE_COMMON_WINDOW;
+	conditioning.window_iteration = iteration_index;
+	conditioning.fallback_seed = rng.getSeed();
+	conditioning.fallback_domain = RNG_DOMAIN_PHASE_COMMON_FALLBACK;
+	conditioning.fallback_iteration = iteration_index;
+
+	shapeit_hmm_phase_job_v1 & phase = sample.phase;
+	phase.abi_version = SHAPEIT_HMM_ABI_VERSION;
+	phase.struct_size = sizeof(phase);
+	phase.haplotypes = H.H_opt_hap.bytes;
+	phase.haplotypes_length = H.H_opt_hap.n_bytes;
+	phase.haplotype_stride = H.H_opt_hap.n_cols >> 3;
+	phase.centimorgans = M.cm.data();
+	phase.centimorgans_length = M.cm.size();
+	phase.recombination = M.t.data();
+	phase.recombination_length = M.t.size();
+	phase.rare_alleles = reinterpret_cast<const int8_t *>(M.rare_allele.data());
+	phase.rare_alleles_length = M.rare_allele.size();
+	phase.effective_population_size = M.Neff;
+	phase.total_haplotypes = M.Nhap;
+	phase.emission_match = M.ee;
+	phase.emission_mismatch = M.ed;
+	phase.stage = iteration_types[iteration_stage];
+	phase.prune_threshold = options["mcmc-prune"].as < double > ();
+	phase.sample_seed = rng.getSeed();
+	phase.sample_domain = RNG_DOMAIN_PHASE_COMMON_MCMC;
+	phase.sample_iteration = iteration_index;
+
+	shapeit_common_iteration_result_v1 result = {};
+	const uint32_t status = shapeit_common_workers_run_iteration_v1(
+		phase_workers, &parameters, &result);
+	const string failed_sample = result.failed_sample < static_cast<size_t>(G.n_ind)
+		? G.vecG[result.failed_sample]->name
+		: "unknown sample";
+	if (status == SHAPEIT_COMMON_STATUS_INSUFFICIENT_STATES) {
+		vrb.error("Fewer than two conditioning haplotypes are available for [" +
+			failed_sample + "]");
 	}
-	vrb.bullet("HMM computations [K=" + stb.str(statH.mean(), 1) + "+/-" + stb.str(statH.sd(), 1) + " / W=" + stb.str(statS.mean(), 2) + "Mb / US=" + stb.str(n_underflow_recovered_summing) + " / UP=" + stb.str(n_underflow_recovered_precision) + "] (" + stb.str(tac.rel_time()*1.0/1000, 2) + "s)");
+	if (status != SHAPEIT_COMMON_STATUS_OK) {
+		throw runtime_error("Rust common iteration failed for [" + failed_sample +
+			"] (status " + to_string(status) + ")");
+	}
+	if (result.fatal_outcome == -2) {
+		vrb.error("Diploid underflow impossible to recover for [" + failed_sample + "]");
+	}
+	if (result.fatal_outcome == -1) {
+		vrb.error("Haploid underflow impossible to recover for [" + failed_sample + "]");
+	}
+
+	const size_t fallback_count = shapeit_common_workers_fallback_count_v1(phase_workers);
+	for (size_t index = 0 ; index < fallback_count ; index ++) {
+		shapeit_common_fallback_v1 fallback = {};
+		const uint32_t fallback_status = shapeit_common_workers_fallback_v1(
+			phase_workers, index, &fallback);
+		if (fallback_status != SHAPEIT_COMMON_STATUS_OK ||
+			fallback.sample >= static_cast<size_t>(G.n_ind)) {
+			throw runtime_error("Rust common fallback reporting failed (status " +
+				to_string(fallback_status) + ")");
+		}
+		vrb.warning("No PBWT states found [" + G.vecG[fallback.sample]->name + " / w=" +
+			stb.str(fallback.window) + "] / Using " + stb.str(fallback.states) +
+			" random states");
+	}
+
+	vrb.bullet("HMM computations [K=" + stb.str(result.conditioning_states_mean, 1) +
+		"+/-" + stb.str(result.conditioning_states_sd, 1) + " / W=" +
+		stb.str(result.window_megabases_mean, 2) + "Mb / US=" +
+		stb.str(result.underflow_recovered_summing) + " / UP=" +
+		stb.str(result.underflow_recovered_precision) + "] (" +
+		stb.str(tac.rel_time()*1.0/1000, 2) + "s)");
 }
 
 void phaser::phase() {

@@ -21,6 +21,7 @@
  ******************************************************************************/
 
 #include <phaser/phaser_header.h>
+#include <shapeit_common.h>
 
 #include <io/genotype_reader/genotype_reader_header.h>
 #include <io/haplotype_writer.h>
@@ -32,13 +33,8 @@
 using namespace std;
 
 void phaser::read_files_and_initialise() {
-	//step0: Initialize seed and multi-threading
+	//step0: Initialize seed
 	rng.setSeed(options["seed"].as < int > ());
-	if (options["thread"].as < int > () > 1) {
-		i_workers = 0; i_jobs = 0;
-		id_workers = vector < pthread_t > (options["thread"].as < int > ());
-		pthread_mutex_init(&mutex_workers, NULL);
-	}
 
 	//step1: Set up the genotype reader
 	vrb.title("Reading genotype data:");
@@ -108,7 +104,18 @@ void phaser::read_files_and_initialise() {
 	//step8: Initialize genotype structures
 	genotype_builder(G, options["thread"].as < int > ()).build();
 
-	//step9: Allocate data structures for computations
-	threadData = vector < compute_job >(
-		options["thread"].as < int > (), compute_job(G, H));
+	//step9: Allocate persistent Rust workers for common-phasing iterations
+	vector < shapeit_genotype_graph_v1 * > graphs(G.n_ind, nullptr);
+	vector < uint8_t > haploid(G.n_ind, 0);
+	for (int ind = 0 ; ind < G.n_ind ; ind ++) {
+		graphs[ind] = G.vecG[ind]->Graph;
+		haploid[ind] = G.vecG[ind]->isHaploid();
+	}
+	const uint32_t status = shapeit_common_workers_create_v1(
+		options["thread"].as < int > (), graphs.data(), graphs.size(),
+		haploid.data(), haploid.size(), &phase_workers);
+	if (status != SHAPEIT_COMMON_STATUS_OK) {
+		throw runtime_error("Rust common worker pool rejected initialization (status " +
+			to_string(status) + ")");
+	}
 }

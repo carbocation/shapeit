@@ -33,15 +33,18 @@ hmm_parameters::~hmm_parameters() {
 	t.clear();
 	nt.clear();
 	cm_double.clear();
+	bp.clear();
 }
 
 void hmm_parameters::initialise(variant_map & V, int _Neff, int _Nhap) {
 	Neff = _Neff; Nhap = _Nhap;
 	cm = vector < float > (V.size(), 0.0);
 	cm_double = vector < double > (V.size(), 0.0);
+	bp = vector < int32_t > (V.size(), 0);
 	for (int l = 0 ; l < V.size() ; l ++) {
 		cm[l] = V.vec_pos[l]->cm;
 		cm_double[l] = V.vec_pos[l]->cm;
+		bp[l] = V.vec_pos[l]->bp;
 	}
 	t = vector < float > (V.size() - 1, 0.0);
 	nt = vector < float > (V.size() - 1, 0.0);
@@ -79,4 +82,3 @@ float hmm_parameters::getBackwardTransProb(int prev_idx, int curr_idx) {
 		return -1.0f * expm1f(-0.04 * Neff * dist_cm / Nhap);
 	}
 }
-

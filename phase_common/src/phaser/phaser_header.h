@@ -24,7 +24,6 @@
 #define _PHASER_H
 
 #include <utils/otools.h>
-#include <objects/compute_job.h>
 #include <objects/hmm_parameters.h>
 
 #include <containers/genotype_set.h>
@@ -34,6 +33,8 @@
 #define STAGE_BURN	0
 #define STAGE_PRUN	1
 #define STAGE_MAIN	2
+
+struct shapeit_common_workers_v1;
 
 class phaser {
 public:
@@ -52,23 +53,14 @@ public:
 	int pbwt_depth;
 	double pbwt_modulo;
 
-	//MULTI-THREADING
-	int i_workers, i_jobs;
-	std::vector < pthread_t > id_workers;
-	pthread_mutex_t mutex_workers;
-	std::vector < compute_job > threadData;
+	//RUST PHASING WORKERS
+	shapeit_common_workers_v1 * phase_workers;
 
 	//MCMC
 	std::vector < unsigned int > iteration_types;
 	std::vector < unsigned int > iteration_counts;
 	unsigned int iteration_stage;
 	uint32_t iteration_index;
-	int n_underflow_recovered_summing;
-	int n_underflow_recovered_precision;
-
-	//STATS
-	stats1D statH,statS;
-	std::vector < double > storedKsizes;
 
 	//CONSTRUCTOR
 	phaser();
@@ -76,7 +68,6 @@ public:
 
 	//METHODS
 	void phase();
-	void phaseWindow(int, int);
 	void phaseWindow();
 
 	//PARAMETERS

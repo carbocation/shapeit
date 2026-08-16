@@ -28,9 +28,6 @@
 void phaser::write_files_and_finalise() {
 	vrb.title("Finalization:");
 
-	//step0: multi-threading
-	if (options["thread"].as < int > () > 1) pthread_mutex_destroy(&mutex_workers);
-
 	//
 	G.solve();
 	H.updateHaplotypes(G);
