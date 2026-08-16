@@ -1428,3 +1428,6 @@ mod tests {
         assert_eq!(transitions, before);
     }
 }
+
+#[cfg(feature = "experimental-single-hmm")]
+mod single;

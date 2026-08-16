@@ -30,4 +30,10 @@ int run_haplotype_segment_double_rust(
 	genotype *, bitmatrix &, std::vector < unsigned int > &, window &,
 	hmm_parameters &, std::vector < double > &, std::vector < float > &);
 
+#ifdef SHAPEIT_EXPERIMENTAL_RUST_SINGLE_HMM
+int run_haplotype_segment_single_rust(
+	genotype *, bitmatrix &, std::vector < unsigned int > &, window &,
+	hmm_parameters &, std::vector < double > &, std::vector < float > &);
+#endif
+
 #endif

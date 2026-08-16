@@ -9,6 +9,9 @@ publish = false
 [lib]
 crate-type = ["staticlib"]
 
+[features]
+experimental-single-hmm = []
+
 [profile.dev]
 panic = "abort"
 

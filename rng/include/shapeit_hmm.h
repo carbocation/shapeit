@@ -64,6 +64,62 @@ typedef struct {
     size_t alpha_locus_scratch_length;
 } shapeit_hmm_segment_double_v1;
 
+#ifdef SHAPEIT_EXPERIMENTAL_RUST_SINGLE_HMM
+typedef struct {
+    uint32_t abi_version;
+    uint32_t struct_size;
+
+    const uint8_t * variants;
+    size_t variants_length;
+    const uint8_t * ambiguous;
+    size_t ambiguous_length;
+    const uint16_t * segment_lengths;
+    size_t segment_lengths_length;
+    const uint64_t * diplotypes;
+    size_t diplotypes_length;
+
+    const uint8_t * haplotypes;
+    size_t haplotypes_length;
+    size_t haplotype_stride;
+    size_t conditioning_haplotypes;
+    uint32_t locus_offset;
+
+    const float * centimorgans;
+    size_t centimorgans_length;
+    const float * recombination;
+    size_t recombination_length;
+    const int8_t * rare_alleles;
+    size_t rare_alleles_length;
+    int32_t effective_population_size;
+    int32_t total_haplotypes;
+    float emission_match;
+    float emission_mismatch;
+
+    int32_t segment_first;
+    int32_t segment_last;
+    int32_t locus_first;
+    int32_t locus_last;
+    int32_t ambiguous_first;
+    int32_t ambiguous_last;
+    int32_t missing_first;
+    int32_t missing_last;
+    int32_t transition_first;
+    int32_t transition_last;
+
+    double * transition_probabilities;
+    size_t transition_probabilities_length;
+    float * missing_probabilities;
+    size_t missing_probabilities_length;
+
+    float * scratch;
+    size_t scratch_length;
+    int32_t * alpha_locus_scratch;
+    size_t alpha_locus_scratch_length;
+    size_t * index_scratch;
+    size_t index_scratch_length;
+} shapeit_hmm_segment_single_v1;
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -79,6 +135,18 @@ uint32_t shapeit_hmm_double_scratch_len_v1(
 uint32_t shapeit_hmm_run_segment_double_v1(
     const shapeit_hmm_segment_double_v1 * parameters,
     int32_t * outcome);
+
+#ifdef SHAPEIT_EXPERIMENTAL_RUST_SINGLE_HMM
+uint32_t shapeit_hmm_single_scratch_len_v1(
+    const shapeit_hmm_segment_single_v1 * parameters,
+    size_t * float_scratch_length,
+    size_t * alpha_locus_scratch_length,
+    size_t * index_scratch_length);
+
+uint32_t shapeit_hmm_run_segment_single_v1(
+    const shapeit_hmm_segment_single_v1 * parameters,
+    int32_t * outcome);
+#endif
 
 #ifdef __cplusplus
 }

@@ -18,18 +18,27 @@ kernels; other targets use portable byte-exact implementations.
 
 ## Common HMM window
 
-`shapeit_hmm_run_segment_double_v1` owns one complete double-precision
-common-phasing HMM window: forward and backward recurrences, transition
-contraction, and missing-genotype probabilities. The ABI accepts the genotype
-graph, an already subset-transposed conditioning panel, model parameters, and
-window coordinates. Rust validates the complete graph-derived layout before
-writing any output, while all variable-size workspace remains caller-owned.
+`shapeit_hmm_run_segment_double_v1` owns the complete double-precision fallback.
+It covers a whole common-phasing HMM window: forward and backward recurrences,
+transition contraction, and missing-genotype probabilities. The ABI accepts the
+genotype graph, an already subset-transposed conditioning panel, model
+parameters, and window coordinates. Rust validates the complete graph-derived
+layout before writing any output, while all variable-size workspace remains
+caller-owned.
+
+The `experimental-single-hmm` Cargo feature also builds
+`shapeit_hmm_run_segment_single_v1`, a whole-window port of the normal
+single-precision HMM with exact 1/2/4/8-lane state compression and
+mixed-precision underflow recovery. Its C declarations and adapter require
+`SHAPEIT_EXPERIMENTAL_RUST_SINGLE_HMM`. It is deliberately excluded from the
+default production archive because the measured production screen remains
+slower than the C++ single-precision implementation.
 
 The portable implementation is used on non-x86 targets. SHAPEIT's existing
 x86-64 build contract requires AVX2 and FMA; the Rust build uses the same
-features and explicitly vectorizes the dominant homozygous and ambiguous
-recurrences. The C++ adapter makes one Rust call per double-precision recovery
-window rather than crossing the ABI within a locus loop.
+features. The experimental single-precision implementation preserves the
+existing AVX2/FMA arithmetic and reduction order. The C++ adapters make one
+Rust call per HMM window rather than crossing the ABI within a locus loop.
 
 ## Random-number generation
 
