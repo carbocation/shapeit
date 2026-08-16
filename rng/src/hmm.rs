@@ -1429,5 +1429,4 @@ mod tests {
     }
 }
 
-#[cfg(feature = "experimental-single-hmm")]
 mod single;

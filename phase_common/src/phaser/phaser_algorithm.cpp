@@ -65,9 +65,10 @@ void phaser::phaseWindow(int id_worker, int id_job) {
 				threadData[id_worker].T, threadData[id_worker].M);
 		} else {
 			//Try single precision as this is faster
-			haplotype_segment_single HS(G.vecG[id_job], H.H_opt_hap, threadData[id_worker].Kstates[w], threadData[id_worker].Windows.W[w], M);
-			HS.forward();
-			outcome = HS.backward(threadData[id_worker].T, threadData[id_worker].M);
+			outcome = run_haplotype_segment_single_rust(
+				G.vecG[id_job], H.H_opt_hap, threadData[id_worker].Kstates[w],
+				threadData[id_worker].Windows.W[w], M,
+				threadData[id_worker].T, threadData[id_worker].M);
 
 			//Underflow happening with single precision, rerun using double precision
 			if (outcome != 0) {

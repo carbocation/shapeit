@@ -64,7 +64,6 @@ typedef struct {
     size_t alpha_locus_scratch_length;
 } shapeit_hmm_segment_double_v1;
 
-#ifdef SHAPEIT_EXPERIMENTAL_RUST_SINGLE_HMM
 typedef struct {
     uint32_t abi_version;
     uint32_t struct_size;
@@ -118,7 +117,6 @@ typedef struct {
     size_t * index_scratch;
     size_t index_scratch_length;
 } shapeit_hmm_segment_single_v1;
-#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -136,7 +134,6 @@ uint32_t shapeit_hmm_run_segment_double_v1(
     const shapeit_hmm_segment_double_v1 * parameters,
     int32_t * outcome);
 
-#ifdef SHAPEIT_EXPERIMENTAL_RUST_SINGLE_HMM
 uint32_t shapeit_hmm_single_scratch_len_v1(
     const shapeit_hmm_segment_single_v1 * parameters,
     size_t * float_scratch_length,
@@ -146,7 +143,10 @@ uint32_t shapeit_hmm_single_scratch_len_v1(
 uint32_t shapeit_hmm_run_segment_single_v1(
     const shapeit_hmm_segment_single_v1 * parameters,
     int32_t * outcome);
-#endif
+
+uint32_t shapeit_hmm_run_segment_single_prevalidated_v1(
+    const shapeit_hmm_segment_single_v1 * parameters,
+    int32_t * outcome);
 
 #ifdef __cplusplus
 }

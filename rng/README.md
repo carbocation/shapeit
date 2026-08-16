@@ -26,18 +26,16 @@ parameters, and window coordinates. Rust validates the complete graph-derived
 layout before writing any output, while all variable-size workspace remains
 caller-owned.
 
-The `experimental-single-hmm` Cargo feature also builds
-`shapeit_hmm_run_segment_single_v1`, a whole-window port of the normal
-single-precision HMM with exact 1/2/4/8-lane state compression and
-mixed-precision underflow recovery. Its C declarations and adapter require
-`SHAPEIT_EXPERIMENTAL_RUST_SINGLE_HMM`. It is deliberately excluded from the
-default production archive because the measured production screen remains
-slower than the C++ single-precision implementation.
+`shapeit_hmm_run_segment_single_v1` owns the normal single-precision HMM with
+exact 1/2/4/8-lane state compression and mixed-precision underflow recovery.
+The common phaser uses the constant-time prevalidated entry point after its C++
+adapter constructs a valid window layout; the fully validating entry point
+remains available to other ABI callers.
 
 The portable implementation is used on non-x86 targets. SHAPEIT's existing
 x86-64 build contract requires AVX2 and FMA; the Rust build uses the same
-features. The experimental single-precision implementation preserves the
-existing AVX2/FMA arithmetic and reduction order. The C++ adapters make one
+features. The single-precision implementation preserves the existing AVX2/FMA
+arithmetic and reduction order. The C++ adapters make one
 Rust call per HMM window rather than crossing the ABI within a locus loop.
 
 ## Random-number generation

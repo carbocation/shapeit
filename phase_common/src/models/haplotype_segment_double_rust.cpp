@@ -24,9 +24,7 @@
 
 #include <shapeit_hmm.h>
 #include <algorithm>
-#ifdef SHAPEIT_EXPERIMENTAL_RUST_SINGLE_HMM
 #include <boost/align/aligned_allocator.hpp>
-#endif
 #include <cstdint>
 #include <stdexcept>
 
@@ -107,7 +105,6 @@ int run_haplotype_segment_double_rust(
 	return outcome;
 }
 
-#ifdef SHAPEIT_EXPERIMENTAL_RUST_SINGLE_HMM
 int run_haplotype_segment_single_rust(
 	genotype * G, bitmatrix & H, vector < unsigned int > & conditioning_haplotypes,
 	window & W, hmm_parameters & M, vector < double > & transition_probabilities,
@@ -158,20 +155,27 @@ int run_haplotype_segment_single_rust(
 	parameters.missing_probabilities = missing_probabilities.data();
 	parameters.missing_probabilities_length = missing_probabilities.size();
 
+	const size_t segment_count = W.stop_segment - W.start_segment + 1;
+	const size_t missing_count = std::max(0, W.stop_missing - W.start_missing + 1);
 	size_t float_scratch_length = 0;
-	size_t alpha_locus_scratch_length = 0;
-	size_t index_scratch_length = 0;
-	uint32_t status = shapeit_hmm_single_scratch_len_v1(
-		&parameters, &float_scratch_length, &alpha_locus_scratch_length,
-		&index_scratch_length);
+	uint32_t status = shapeit_hmm_double_scratch_len_v1(
+		conditioning_haplotypes.size(), segment_count, missing_count,
+		&float_scratch_length);
 	if (status != SHAPEIT_HMM_STATUS_OK) {
 		throw runtime_error("Rust single HMM rejected scratch dimensions (status " +
 			to_string(status) + ")");
 	}
-	vector < float, boost::alignment::aligned_allocator < float, 32 > > scratch(
-		float_scratch_length, 0.0f);
-	vector < int32_t > alpha_locus(alpha_locus_scratch_length, 0);
-	vector < size_t > index_scratch(index_scratch_length, 0);
+	if (segment_count > (SIZE_MAX - 1) / 4) {
+		throw runtime_error("Rust single HMM index workspace size overflow");
+	}
+	const size_t index_scratch_length = 4 * segment_count + 1;
+	static thread_local vector < float,
+		boost::alignment::aligned_allocator < float, 32 > > scratch;
+	static thread_local vector < int32_t > alpha_locus;
+	static thread_local vector < size_t > index_scratch;
+	scratch.resize(float_scratch_length);
+	alpha_locus.resize(segment_count);
+	index_scratch.resize(index_scratch_length);
 	parameters.scratch = scratch.data();
 	parameters.scratch_length = scratch.size();
 	parameters.alpha_locus_scratch = alpha_locus.data();
@@ -180,11 +184,10 @@ int run_haplotype_segment_single_rust(
 	parameters.index_scratch_length = index_scratch.size();
 
 	int32_t outcome = 0;
-	status = shapeit_hmm_run_segment_single_v1(&parameters, &outcome);
+	status = shapeit_hmm_run_segment_single_prevalidated_v1(&parameters, &outcome);
 	if (status != SHAPEIT_HMM_STATUS_OK) {
 		throw runtime_error("Rust single HMM rejected the segment layout (status " +
 			to_string(status) + ")");
 	}
 	return outcome;
 }
-#endif

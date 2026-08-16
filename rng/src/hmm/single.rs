@@ -4,12 +4,14 @@ use super::*;
 use core::arch::asm;
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{
-    __m128, __m256, _mm256_add_ps, _mm256_cvtps_pd, _mm256_fmadd_ps, _mm256_loadu_ps,
-    _mm256_mul_ps, _mm256_set1_ps, _mm256_setzero_ps, _mm256_storeu_ps, _mm_loadu_ps,
+    __m128, __m256, _mm256_add_ps, _mm256_and_si256, _mm256_blendv_ps, _mm256_castps128_ps256,
+    _mm256_castsi256_ps, _mm256_cvtps_pd, _mm256_fmadd_ps, _mm256_insertf128_ps, _mm256_loadu_ps,
+    _mm256_mul_ps, _mm256_set1_epi32, _mm256_set1_ps, _mm256_setr_epi32, _mm256_setr_ps,
+    _mm256_setzero_ps, _mm256_slli_epi32, _mm256_srlv_epi32, _mm256_storeu_ps, _mm256_xor_si256,
+    _mm_loadu_ps, _mm_set1_ps, _mm_setr_ps, _mm_storeu_ps,
 };
 
 #[repr(C)]
-#[cfg(feature = "experimental-single-hmm")]
 pub struct HmmSegmentSingleV1 {
     abi_version: u32,
     struct_size: u32,
@@ -64,7 +66,6 @@ pub struct HmmSegmentSingleV1 {
     index_scratch_length: usize,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg(feature = "experimental-single-hmm")]
 struct SingleScratchLayout {
     states: usize,
     segment_count: usize,
@@ -73,7 +74,6 @@ struct SingleScratchLayout {
     float_total: usize,
     index_total: usize,
 }
-#[cfg(feature = "experimental-single-hmm")]
 fn single_validation_shadow(parameters: &HmmSegmentSingleV1) -> HmmSegmentDoubleV1 {
     HmmSegmentDoubleV1 {
         abi_version: parameters.abi_version,
@@ -122,7 +122,43 @@ fn single_validation_shadow(parameters: &HmmSegmentSingleV1) -> HmmSegmentDouble
     }
 }
 
-#[cfg(feature = "experimental-single-hmm")]
+fn single_prevalidated_layout(parameters: &HmmSegmentSingleV1) -> Result<ValidatedLayout, u32> {
+    let segment_first = usize_coordinate(parameters.segment_first)?;
+    let segment_last = usize_coordinate(parameters.segment_last)?;
+    let locus_first = usize_coordinate(parameters.locus_first)?;
+    let locus_last = usize_coordinate(parameters.locus_last)?;
+    let ambiguous_first = usize_coordinate(parameters.ambiguous_first)?;
+    let missing_first = usize_coordinate(parameters.missing_first)?;
+    let transition_last = usize_coordinate(parameters.transition_last)?;
+    if segment_last < segment_first || locus_last < locus_first {
+        return Err(STATUS_INVALID_DIMENSIONS);
+    }
+    let segment_count = segment_last - segment_first + 1;
+    let missing_count = if parameters.missing_last < parameters.missing_first {
+        0
+    } else {
+        usize::try_from(
+            i64::from(parameters.missing_last) - i64::from(parameters.missing_first) + 1,
+        )
+        .map_err(|_| STATUS_INTEGER_OVERFLOW)?
+    };
+    let scratch = scratch_layout(
+        parameters.conditioning_haplotypes,
+        segment_count,
+        missing_count,
+    )?;
+    Ok(ValidatedLayout {
+        scratch,
+        segment_first,
+        segment_last,
+        locus_first,
+        locus_last,
+        ambiguous_first,
+        missing_first,
+        transition_last,
+    })
+}
+
 fn single_scratch_layout(
     parameters: &HmmSegmentSingleV1,
     variants: &[u8],
@@ -223,7 +259,6 @@ fn single_scratch_layout(
         index_total,
     })
 }
-#[cfg(feature = "experimental-single-hmm")]
 struct SingleEngine<'a> {
     variants: &'a [u8],
     ambiguous: &'a [u8],
@@ -277,7 +312,6 @@ struct SingleEngine<'a> {
     d_probs: [f64; HAPLOTYPES * HAPLOTYPES * HAPLOTYPES * HAPLOTYPES],
 }
 
-#[cfg(feature = "experimental-single-hmm")]
 impl SingleEngine<'_> {
     #[inline]
     fn allele(&self, relative_locus: usize, conditioning_haplotype: usize) -> bool {
@@ -302,6 +336,7 @@ impl SingleEngine<'_> {
         variant_code(self.variants, locus) == 1
     }
 
+    #[inline(always)]
     fn transition_probability(&self, previous: usize, current: usize) -> f32 {
         debug_assert_ne!(previous, current);
         if previous.abs_diff(current) == 1 {
@@ -386,41 +421,130 @@ impl SingleEngine<'_> {
         if self.prob_haps == haplotypes {
             return;
         }
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            // The enclosing SHAPEIT common-phasing binary requires AVX2/FMA.
+            unsafe {
+                self.reshape_haplotypes_avx2(haplotypes);
+            }
+            return;
+        }
+
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            match (self.prob_haps, haplotypes) {
+                (8, 1) | (8, 2) | (8, 4) => {
+                    for k in 1..self.conditioning_haplotypes {
+                        for h in 0..haplotypes {
+                            self.prob[k * haplotypes + h] = self.prob[k * HAPLOTYPES + h];
+                        }
+                    }
+                }
+                (1, 2) | (1, 4) | (1, 8) => {
+                    for k in (0..self.conditioning_haplotypes).rev() {
+                        let value = self.prob[k];
+                        for h in 0..haplotypes {
+                            self.prob[k * haplotypes + h] = value;
+                        }
+                    }
+                }
+                (2, 4) | (2, 8) => {
+                    for k in (0..self.conditioning_haplotypes).rev() {
+                        let values = [self.prob[k * 2], self.prob[k * 2 + 1]];
+                        for h in 0..haplotypes {
+                            self.prob[k * haplotypes + h] = values[h & 1];
+                        }
+                    }
+                }
+                (4, 8) => {
+                    for k in (0..self.conditioning_haplotypes).rev() {
+                        let values = [
+                            self.prob[k * 4],
+                            self.prob[k * 4 + 1],
+                            self.prob[k * 4 + 2],
+                            self.prob[k * 4 + 3],
+                        ];
+                        for h in 0..HAPLOTYPES {
+                            self.prob[k * HAPLOTYPES + h] = values[h & 3];
+                        }
+                    }
+                }
+                _ => unreachable!("invalid compressed HMM lane transition"),
+            }
+            self.prob_haps = haplotypes;
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn reshape_haplotypes_avx2(&mut self, haplotypes: usize) {
+        let probability = self.prob.as_mut_ptr();
         match (self.prob_haps, haplotypes) {
-            (8, 1) | (8, 2) | (8, 4) => {
+            (8, 1) => {
                 for k in 1..self.conditioning_haplotypes {
-                    for h in 0..haplotypes {
-                        self.prob[k * haplotypes + h] = self.prob[k * HAPLOTYPES + h];
-                    }
+                    *probability.add(k) = *probability.add(k * HAPLOTYPES);
                 }
             }
-            (1, 2) | (1, 4) | (1, 8) => {
-                for k in (0..self.conditioning_haplotypes).rev() {
-                    let value = self.prob[k];
-                    for h in 0..haplotypes {
-                        self.prob[k * haplotypes + h] = value;
-                    }
+            (8, 2) => {
+                for k in 1..self.conditioning_haplotypes {
+                    *probability.add(k * 2) = *probability.add(k * HAPLOTYPES);
+                    *probability.add(k * 2 + 1) = *probability.add(k * HAPLOTYPES + 1);
                 }
             }
-            (2, 4) | (2, 8) => {
+            (8, 4) => {
+                for k in 1..self.conditioning_haplotypes {
+                    _mm_storeu_ps(
+                        probability.add(k * 4),
+                        _mm_loadu_ps(probability.add(k * HAPLOTYPES)),
+                    );
+                }
+            }
+            (1, 2) => {
                 for k in (0..self.conditioning_haplotypes).rev() {
-                    let values = [self.prob[k * 2], self.prob[k * 2 + 1]];
-                    for h in 0..haplotypes {
-                        self.prob[k * haplotypes + h] = values[h & 1];
-                    }
+                    let value = *probability.add(k);
+                    *probability.add(k * 2) = value;
+                    *probability.add(k * 2 + 1) = value;
+                }
+            }
+            (1, 4) => {
+                for k in (0..self.conditioning_haplotypes).rev() {
+                    _mm_storeu_ps(probability.add(k * 4), _mm_set1_ps(*probability.add(k)));
+                }
+            }
+            (1, 8) => {
+                for k in (0..self.conditioning_haplotypes).rev() {
+                    _mm256_storeu_ps(
+                        probability.add(k * HAPLOTYPES),
+                        _mm256_set1_ps(*probability.add(k)),
+                    );
+                }
+            }
+            (2, 4) => {
+                for k in (0..self.conditioning_haplotypes).rev() {
+                    let value0 = *probability.add(k * 2);
+                    let value1 = *probability.add(k * 2 + 1);
+                    _mm_storeu_ps(
+                        probability.add(k * 4),
+                        _mm_setr_ps(value0, value1, value0, value1),
+                    );
+                }
+            }
+            (2, 8) => {
+                for k in (0..self.conditioning_haplotypes).rev() {
+                    let value0 = *probability.add(k * 2);
+                    let value1 = *probability.add(k * 2 + 1);
+                    let value = _mm_setr_ps(value0, value1, value0, value1);
+                    let mut row = _mm256_castps128_ps256(value);
+                    row = _mm256_insertf128_ps(row, value, 1);
+                    _mm256_storeu_ps(probability.add(k * HAPLOTYPES), row);
                 }
             }
             (4, 8) => {
                 for k in (0..self.conditioning_haplotypes).rev() {
-                    let values = [
-                        self.prob[k * 4],
-                        self.prob[k * 4 + 1],
-                        self.prob[k * 4 + 2],
-                        self.prob[k * 4 + 3],
-                    ];
-                    for h in 0..HAPLOTYPES {
-                        self.prob[k * HAPLOTYPES + h] = values[h & 3];
-                    }
+                    let value = _mm_loadu_ps(probability.add(k * 4));
+                    _mm_storeu_ps(probability.add(k * HAPLOTYPES), value);
+                    _mm_storeu_ps(probability.add(k * HAPLOTYPES + 4), value);
                 }
             }
             _ => unreachable!("invalid compressed HMM lane transition"),
@@ -434,15 +558,15 @@ impl SingleEngine<'_> {
         if rare_allele >= 0 && genotype_allele != (rare_allele != 0) {
             return false;
         }
-        self.run_reduced(relative_locus, genotype_allele, None, transition);
+        self.run_reduced::<false>(relative_locus, genotype_allele, 0, transition);
         true
     }
 
-    fn run_reduced(
+    fn run_reduced<const AMBIGUOUS: bool>(
         &mut self,
         relative_locus: usize,
         genotype_allele: bool,
-        ambiguous_code: Option<u8>,
+        ambiguous_code: u8,
         transition: f32,
     ) {
         #[cfg(target_arch = "x86_64")]
@@ -450,25 +574,25 @@ impl SingleEngine<'_> {
             // The enclosing SHAPEIT common-phasing binary already requires AVX2 and FMA.
             unsafe {
                 match self.prob_haps {
-                    1 => self.run_reduced_avx2::<1>(
+                    1 => self.run_compressed_avx2::<1, AMBIGUOUS>(
                         relative_locus,
                         genotype_allele,
                         ambiguous_code,
                         transition,
                     ),
-                    2 => self.run_reduced_avx2::<2>(
+                    2 => self.run_compressed_avx2::<2, AMBIGUOUS>(
                         relative_locus,
                         genotype_allele,
                         ambiguous_code,
                         transition,
                     ),
-                    4 => self.run_reduced_avx2::<4>(
+                    4 => self.run_compressed_avx2::<4, AMBIGUOUS>(
                         relative_locus,
                         genotype_allele,
                         ambiguous_code,
                         transition,
                     ),
-                    HAPLOTYPES => self.run_full_avx2(
+                    HAPLOTYPES => self.run_full_avx2::<AMBIGUOUS>(
                         relative_locus,
                         genotype_allele,
                         ambiguous_code,
@@ -490,9 +614,11 @@ impl SingleEngine<'_> {
                 let allele = self.allele(relative_locus, k);
                 let start = k * haplotypes;
                 for h in 0..haplotypes {
-                    let graph_haplotype = ambiguous_code
-                        .map(|code| ((code >> h) & 1) != 0)
-                        .unwrap_or(genotype_allele);
+                    let graph_haplotype = if AMBIGUOUS {
+                        ((ambiguous_code >> h) & 1) != 0
+                    } else {
+                        genotype_allele
+                    };
                     let emission = if graph_haplotype != allele {
                         self.mismatch
                     } else {
@@ -511,28 +637,47 @@ impl SingleEngine<'_> {
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,fma")]
-    unsafe fn run_reduced_avx2<const N: usize>(
+    unsafe fn run_compressed_avx2<const N: usize, const AMBIGUOUS: bool>(
         &mut self,
         relative_locus: usize,
         genotype_allele: bool,
-        ambiguous_code: Option<u8>,
+        ambiguous_code: u8,
         transition: f32,
     ) {
-        debug_assert!(matches!(N, 1 | 2 | 4 | HAPLOTYPES));
+        debug_assert!(matches!(N, 1 | 2 | 4));
         debug_assert_eq!(self.prob_haps, N);
 
         let factor = transition / (self.conditioning_haplotypes as f32 * self.prob_sum_t);
         let stay_factor = (1.0 - transition) / self.prob_sum_t;
-        let mut frequency_lanes = [0.0f32; HAPLOTYPES];
-        for lane in 0..HAPLOTYPES {
-            frequency_lanes[lane] = self.prob_sum_h[lane % N];
-        }
-        let transferred = _mm256_mul_ps(
-            _mm256_loadu_ps(frequency_lanes.as_ptr()),
-            _mm256_set1_ps(factor),
-        );
+        let frequencies = if N == 1 {
+            _mm256_set1_ps(self.prob_sum_h[0])
+        } else if N == 2 {
+            _mm256_setr_ps(
+                self.prob_sum_h[0],
+                self.prob_sum_h[1],
+                self.prob_sum_h[0],
+                self.prob_sum_h[1],
+                self.prob_sum_h[0],
+                self.prob_sum_h[1],
+                self.prob_sum_h[0],
+                self.prob_sum_h[1],
+            )
+        } else {
+            _mm256_setr_ps(
+                self.prob_sum_h[0],
+                self.prob_sum_h[1],
+                self.prob_sum_h[2],
+                self.prob_sum_h[3],
+                self.prob_sum_h[0],
+                self.prob_sum_h[1],
+                self.prob_sum_h[2],
+                self.prob_sum_h[3],
+            )
+        };
+        let transferred = _mm256_mul_ps(frequencies, _mm256_set1_ps(factor));
         let stay = _mm256_set1_ps(stay_factor);
         let mismatch = _mm256_set1_ps(self.mismatch);
+        let ones = _mm256_set1_ps(1.0);
         let mut vector_sums: [__m256; HAPLOTYPES] = [
             _mm256_setzero_ps(),
             _mm256_setzero_ps(),
@@ -549,41 +694,141 @@ impl SingleEngine<'_> {
         let mut k = 0usize;
         let mut probability_index = 0usize;
 
-        while k + 7 < self.conditioning_haplotypes {
-            let packed = *allele_bytes.add(k >> 3);
-            let hom_mismatches = ambiguous_code.map_or_else(
-                || Some(if genotype_allele { !packed } else { packed }),
-                |_| None,
-            );
-            for vector_index in 0..N {
+        if N == 1 {
+            let shifts = _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0);
+            let graph = if AMBIGUOUS {
+                i32::from((ambiguous_code & 1) != 0)
+            } else {
+                i32::from(genotype_allele)
+            };
+            let graph_bits = _mm256_set1_epi32(graph);
+            let one = _mm256_set1_epi32(1);
+            while k + 7 < self.conditioning_haplotypes {
+                let packed_byte = *allele_bytes.add(k >> 3);
+                let packed = _mm256_set1_epi32(i32::from(packed_byte));
+                let mask = _mm256_slli_epi32(
+                    _mm256_xor_si256(
+                        _mm256_and_si256(_mm256_srlv_epi32(packed, shifts), one),
+                        graph_bits,
+                    ),
+                    31,
+                );
                 let mut value = _mm256_fmadd_ps(
                     _mm256_loadu_ps(probability.add(probability_index)),
                     stay,
                     transferred,
                 );
-                if hom_mismatches == Some(u8::MAX) {
-                    value = _mm256_mul_ps(value, mismatch);
-                } else if hom_mismatches != Some(0) {
-                    let mut emission_lanes = [1.0f32; HAPLOTYPES];
-                    for lane in 0..HAPLOTYPES {
-                        let lane_index = vector_index * HAPLOTYPES + lane;
-                        let conditioning_offset = lane_index / N;
-                        let haplotype = lane_index % N;
-                        let conditioning_allele = ((packed >> (7 - conditioning_offset)) & 1) != 0;
-                        let graph_haplotype = ambiguous_code
-                            .map(|code| ((code >> haplotype) & 1) != 0)
-                            .unwrap_or(genotype_allele);
-                        if graph_haplotype != conditioning_allele {
-                            emission_lanes[lane] = self.mismatch;
-                        }
-                    }
-                    value = _mm256_mul_ps(value, _mm256_loadu_ps(emission_lanes.as_ptr()));
-                }
-                vector_sums[vector_index] = _mm256_add_ps(vector_sums[vector_index], value);
+                value = _mm256_mul_ps(
+                    value,
+                    _mm256_blendv_ps(ones, mismatch, _mm256_castsi256_ps(mask)),
+                );
+                vector_sums[0] = _mm256_add_ps(vector_sums[0], value);
                 _mm256_storeu_ps(probability.add(probability_index), value);
                 probability_index += HAPLOTYPES;
+                k += HAPLOTYPES;
             }
-            k += HAPLOTYPES;
+        } else if N == 2 {
+            let shifts03 = _mm256_setr_epi32(7, 7, 6, 6, 5, 5, 4, 4);
+            let shifts47 = _mm256_setr_epi32(3, 3, 2, 2, 1, 1, 0, 0);
+            let graph0 = if AMBIGUOUS {
+                i32::from((ambiguous_code & 1) != 0)
+            } else {
+                i32::from(genotype_allele)
+            };
+            let graph1 = if AMBIGUOUS {
+                i32::from((ambiguous_code & 2) != 0)
+            } else {
+                i32::from(genotype_allele)
+            };
+            let graph_bits = _mm256_setr_epi32(
+                graph0, graph1, graph0, graph1, graph0, graph1, graph0, graph1,
+            );
+            let one = _mm256_set1_epi32(1);
+            while k + 7 < self.conditioning_haplotypes {
+                let packed_byte = *allele_bytes.add(k >> 3);
+                let packed = _mm256_set1_epi32(i32::from(packed_byte));
+                let mut value03 = _mm256_fmadd_ps(
+                    _mm256_loadu_ps(probability.add(probability_index)),
+                    stay,
+                    transferred,
+                );
+                let mut value47 = _mm256_fmadd_ps(
+                    _mm256_loadu_ps(probability.add(probability_index + HAPLOTYPES)),
+                    stay,
+                    transferred,
+                );
+                let mask03 = _mm256_slli_epi32(
+                    _mm256_xor_si256(
+                        _mm256_and_si256(_mm256_srlv_epi32(packed, shifts03), one),
+                        graph_bits,
+                    ),
+                    31,
+                );
+                let mask47 = _mm256_slli_epi32(
+                    _mm256_xor_si256(
+                        _mm256_and_si256(_mm256_srlv_epi32(packed, shifts47), one),
+                        graph_bits,
+                    ),
+                    31,
+                );
+                value03 = _mm256_mul_ps(
+                    value03,
+                    _mm256_blendv_ps(ones, mismatch, _mm256_castsi256_ps(mask03)),
+                );
+                value47 = _mm256_mul_ps(
+                    value47,
+                    _mm256_blendv_ps(ones, mismatch, _mm256_castsi256_ps(mask47)),
+                );
+                vector_sums[0] = _mm256_add_ps(vector_sums[0], value03);
+                vector_sums[1] = _mm256_add_ps(vector_sums[1], value47);
+                _mm256_storeu_ps(probability.add(probability_index), value03);
+                _mm256_storeu_ps(probability.add(probability_index + HAPLOTYPES), value47);
+                probability_index += 2 * HAPLOTYPES;
+                k += HAPLOTYPES;
+            }
+        } else {
+            let mut emission_zero_lanes = [1.0f32; 4];
+            let mut emission_one_lanes = [1.0f32; 4];
+            for haplotype in 0..4 {
+                let graph_haplotype = if AMBIGUOUS {
+                    ((ambiguous_code >> haplotype) & 1) != 0
+                } else {
+                    genotype_allele
+                };
+                if graph_haplotype {
+                    emission_zero_lanes[haplotype] = self.mismatch;
+                } else {
+                    emission_one_lanes[haplotype] = self.mismatch;
+                }
+            }
+            let emission_zero = _mm_loadu_ps(emission_zero_lanes.as_ptr());
+            let emission_one = _mm_loadu_ps(emission_one_lanes.as_ptr());
+            while k + 7 < self.conditioning_haplotypes {
+                let packed = *allele_bytes.add(k >> 3);
+                for pair in 0..4 {
+                    let allele0 = ((packed >> (7 - 2 * pair)) & 1) != 0;
+                    let allele1 = ((packed >> (6 - 2 * pair)) & 1) != 0;
+                    let mut emission =
+                        _mm256_castps128_ps256(if allele0 { emission_one } else { emission_zero });
+                    emission = _mm256_insertf128_ps(
+                        emission,
+                        if allele1 { emission_one } else { emission_zero },
+                        1,
+                    );
+                    let value = _mm256_mul_ps(
+                        _mm256_fmadd_ps(
+                            _mm256_loadu_ps(probability.add(probability_index)),
+                            stay,
+                            transferred,
+                        ),
+                        emission,
+                    );
+                    vector_sums[pair] = _mm256_add_ps(vector_sums[pair], value);
+                    _mm256_storeu_ps(probability.add(probability_index), value);
+                    probability_index += HAPLOTYPES;
+                }
+                k += HAPLOTYPES;
+            }
         }
 
         let mut sum_lanes = [0.0f32; HAPLOTYPES * HAPLOTYPES];
@@ -596,9 +841,11 @@ impl SingleEngine<'_> {
         while k < self.conditioning_haplotypes {
             let conditioning_allele = ((*allele_bytes.add(k >> 3) >> (7 - (k & 7))) & 1) != 0;
             for haplotype in 0..N {
-                let graph_haplotype = ambiguous_code
-                    .map(|code| ((code >> haplotype) & 1) != 0)
-                    .unwrap_or(genotype_allele);
+                let graph_haplotype = if AMBIGUOUS {
+                    ((ambiguous_code >> haplotype) & 1) != 0
+                } else {
+                    genotype_allele
+                };
                 let mut value = self.prob[probability_index + haplotype]
                     .mul_add(stay_factor, self.prob_sum_h[haplotype] * factor);
                 if graph_haplotype != conditioning_allele {
@@ -624,11 +871,11 @@ impl SingleEngine<'_> {
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,fma")]
-    unsafe fn run_full_avx2(
+    unsafe fn run_full_avx2<const AMBIGUOUS: bool>(
         &mut self,
         relative_locus: usize,
         genotype_allele: bool,
-        ambiguous_code: Option<u8>,
+        ambiguous_code: u8,
         transition: f32,
     ) {
         debug_assert_eq!(self.prob_haps, HAPLOTYPES);
@@ -640,23 +887,15 @@ impl SingleEngine<'_> {
         let stay_factor = (1.0 - transition) / self.prob_sum_t;
         let stay = _mm256_set1_ps(stay_factor);
         let mismatch = _mm256_set1_ps(self.mismatch);
-        let mut vector_sums: [__m256; HAPLOTYPES] = [
-            _mm256_setzero_ps(),
-            _mm256_setzero_ps(),
-            _mm256_setzero_ps(),
-            _mm256_setzero_ps(),
-            _mm256_setzero_ps(),
-            _mm256_setzero_ps(),
-            _mm256_setzero_ps(),
-            _mm256_setzero_ps(),
-        ];
+        let mut vector_sums: [__m256; HAPLOTYPES];
         let probability = self.prob.as_mut_ptr();
         let row = relative_locus + self.locus_offset;
         let allele_bytes = self.haplotypes.as_ptr().add(row * self.haplotype_stride);
-        let mut k = 0usize;
-        let mut probability_index = 0usize;
+        let mut k: usize;
+        let mut probability_index: usize;
 
-        if let Some(code) = ambiguous_code {
+        if AMBIGUOUS {
+            let code = ambiguous_code;
             let mut emission_zero = [1.0f32; HAPLOTYPES];
             let mut emission_one = [1.0f32; HAPLOTYPES];
             for haplotype in 0..HAPLOTYPES {
@@ -668,28 +907,18 @@ impl SingleEngine<'_> {
             }
             let emission_zero = _mm256_loadu_ps(emission_zero.as_ptr());
             let emission_one = _mm256_loadu_ps(emission_one.as_ptr());
-            while k + 7 < self.conditioning_haplotypes {
-                let packed = *allele_bytes.add(k >> 3);
-                for lane in 0..HAPLOTYPES {
-                    let emission = if ((packed >> (7 - lane)) & 1) != 0 {
-                        emission_one
-                    } else {
-                        emission_zero
-                    };
-                    let value = _mm256_mul_ps(
-                        _mm256_fmadd_ps(
-                            _mm256_loadu_ps(probability.add(probability_index)),
-                            stay,
-                            transferred,
-                        ),
-                        emission,
-                    );
-                    vector_sums[lane] = _mm256_add_ps(vector_sums[lane], value);
-                    _mm256_storeu_ps(probability.add(probability_index), value);
-                    probability_index += HAPLOTYPES;
-                }
-                k += HAPLOTYPES;
-            }
+            let block_count = self.conditioning_haplotypes / HAPLOTYPES;
+            vector_sums = Self::run_full_ambiguous_blocks_avx2(
+                probability,
+                allele_bytes,
+                block_count,
+                stay,
+                transferred,
+                emission_zero,
+                emission_one,
+            );
+            k = block_count * HAPLOTYPES;
+            probability_index = block_count * HAPLOTYPES * HAPLOTYPES;
             while k < self.conditioning_haplotypes {
                 let conditioning_allele = ((*allele_bytes.add(k >> 3) >> (7 - (k & 7))) & 1) != 0;
                 let emission = if conditioning_allele {
@@ -932,12 +1161,146 @@ impl SingleEngine<'_> {
         [sum0, sum1, sum2, sum3, sum4, sum5, sum6, sum7]
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[inline(never)]
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn run_full_ambiguous_blocks_avx2(
+        probability: *mut f32,
+        allele_bytes: *const u8,
+        block_count: usize,
+        stay: __m256,
+        transferred: __m256,
+        emission_zero: __m256,
+        emission_one: __m256,
+    ) -> [__m256; HAPLOTYPES] {
+        let probability_cursor = probability;
+        let allele_cursor = allele_bytes;
+        let blocks = block_count;
+        let emissions = [emission_zero, emission_one];
+        let emission_base = emissions.as_ptr();
+        let mut sum0 = _mm256_setzero_ps();
+        let mut sum1 = _mm256_setzero_ps();
+        let mut sum2 = _mm256_setzero_ps();
+        let mut sum3 = _mm256_setzero_ps();
+        let mut sum4 = _mm256_setzero_ps();
+        let mut sum5 = _mm256_setzero_ps();
+        let mut sum6 = _mm256_setzero_ps();
+        let mut sum7 = _mm256_setzero_ps();
+
+        // Keep every state lane and its running sum in registers. In the
+        // intrinsic form LLVM spills the eight independent accumulators.
+        asm!(
+            "test {blocks}, {blocks}",
+            "jz 4f",
+            "2:",
+            "movzx {packed:e}, byte ptr [{alleles}]",
+            "shl {packed:e}, 24",
+
+            "shl {packed:e}, 1",
+            "sbb {bit}, {bit}",
+            "and {bit}, 32",
+            "vmovups {value}, ymmword ptr [{probability} + 0]",
+            "vfmadd132ps {value}, {transferred}, {stay}",
+            "vmulps {value}, {value}, ymmword ptr [{emissions} + {bit}]",
+            "vaddps {sum0}, {sum0}, {value}",
+            "vmovups ymmword ptr [{probability} + 0], {value}",
+
+            "shl {packed:e}, 1",
+            "sbb {bit}, {bit}",
+            "and {bit}, 32",
+            "vmovups {value}, ymmword ptr [{probability} + 32]",
+            "vfmadd132ps {value}, {transferred}, {stay}",
+            "vmulps {value}, {value}, ymmword ptr [{emissions} + {bit}]",
+            "vaddps {sum1}, {sum1}, {value}",
+            "vmovups ymmword ptr [{probability} + 32], {value}",
+
+            "shl {packed:e}, 1",
+            "sbb {bit}, {bit}",
+            "and {bit}, 32",
+            "vmovups {value}, ymmword ptr [{probability} + 64]",
+            "vfmadd132ps {value}, {transferred}, {stay}",
+            "vmulps {value}, {value}, ymmword ptr [{emissions} + {bit}]",
+            "vaddps {sum2}, {sum2}, {value}",
+            "vmovups ymmword ptr [{probability} + 64], {value}",
+
+            "shl {packed:e}, 1",
+            "sbb {bit}, {bit}",
+            "and {bit}, 32",
+            "vmovups {value}, ymmword ptr [{probability} + 96]",
+            "vfmadd132ps {value}, {transferred}, {stay}",
+            "vmulps {value}, {value}, ymmword ptr [{emissions} + {bit}]",
+            "vaddps {sum3}, {sum3}, {value}",
+            "vmovups ymmword ptr [{probability} + 96], {value}",
+
+            "shl {packed:e}, 1",
+            "sbb {bit}, {bit}",
+            "and {bit}, 32",
+            "vmovups {value}, ymmword ptr [{probability} + 128]",
+            "vfmadd132ps {value}, {transferred}, {stay}",
+            "vmulps {value}, {value}, ymmword ptr [{emissions} + {bit}]",
+            "vaddps {sum4}, {sum4}, {value}",
+            "vmovups ymmword ptr [{probability} + 128], {value}",
+
+            "shl {packed:e}, 1",
+            "sbb {bit}, {bit}",
+            "and {bit}, 32",
+            "vmovups {value}, ymmword ptr [{probability} + 160]",
+            "vfmadd132ps {value}, {transferred}, {stay}",
+            "vmulps {value}, {value}, ymmword ptr [{emissions} + {bit}]",
+            "vaddps {sum5}, {sum5}, {value}",
+            "vmovups ymmword ptr [{probability} + 160], {value}",
+
+            "shl {packed:e}, 1",
+            "sbb {bit}, {bit}",
+            "and {bit}, 32",
+            "vmovups {value}, ymmword ptr [{probability} + 192]",
+            "vfmadd132ps {value}, {transferred}, {stay}",
+            "vmulps {value}, {value}, ymmword ptr [{emissions} + {bit}]",
+            "vaddps {sum6}, {sum6}, {value}",
+            "vmovups ymmword ptr [{probability} + 192], {value}",
+
+            "shl {packed:e}, 1",
+            "sbb {bit}, {bit}",
+            "and {bit}, 32",
+            "vmovups {value}, ymmword ptr [{probability} + 224]",
+            "vfmadd132ps {value}, {transferred}, {stay}",
+            "vmulps {value}, {value}, ymmword ptr [{emissions} + {bit}]",
+            "vaddps {sum7}, {sum7}, {value}",
+            "vmovups ymmword ptr [{probability} + 224], {value}",
+
+            "add {probability}, 256",
+            "inc {alleles}",
+            "dec {blocks}",
+            "jnz 2b",
+            "4:",
+            probability = inout(reg) probability_cursor => _,
+            alleles = inout(reg) allele_cursor => _,
+            blocks = inout(reg) blocks => _,
+            emissions = in(reg) emission_base,
+            stay = in(ymm_reg) stay,
+            transferred = in(ymm_reg) transferred,
+            sum0 = inout(ymm_reg) sum0,
+            sum1 = inout(ymm_reg) sum1,
+            sum2 = inout(ymm_reg) sum2,
+            sum3 = inout(ymm_reg) sum3,
+            sum4 = inout(ymm_reg) sum4,
+            sum5 = inout(ymm_reg) sum5,
+            sum6 = inout(ymm_reg) sum6,
+            sum7 = inout(ymm_reg) sum7,
+            value = out(ymm_reg) _,
+            packed = out(reg) _,
+            bit = out(reg) _,
+            options(nostack),
+        );
+        [sum0, sum1, sum2, sum3, sum4, sum5, sum6, sum7]
+    }
+
     fn run_ambiguous(&mut self, relative_locus: usize, ambiguous_index: usize, transition: f32) {
         let code = self.ambiguous[ambiguous_index];
         if self.prob_haps == 1 {
-            self.run_reduced(relative_locus, (code & 1) != 0, None, transition);
+            self.run_reduced::<false>(relative_locus, (code & 1) != 0, 0, transition);
         } else {
-            self.run_reduced(relative_locus, false, Some(code), transition);
+            self.run_reduced::<true>(relative_locus, false, code, transition);
         }
     }
 
@@ -959,6 +1322,11 @@ impl SingleEngine<'_> {
 
     fn collapse_hom(&mut self, locus: usize, relative_locus: usize, transition: f32) {
         let genotype_allele = self.hap0(locus);
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            self.collapse_avx2::<0>(relative_locus, genotype_allele, 0, transition);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
         self.collapse(relative_locus, Some(genotype_allele), None, transition);
     }
 
@@ -968,18 +1336,25 @@ impl SingleEngine<'_> {
         ambiguous_index: usize,
         transition: f32,
     ) {
-        self.collapse(
-            relative_locus,
-            None,
-            Some(self.ambiguous[ambiguous_index]),
-            transition,
-        );
+        let ambiguous_code = self.ambiguous[ambiguous_index];
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            self.collapse_avx2::<1>(relative_locus, false, ambiguous_code, transition);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        self.collapse(relative_locus, None, Some(ambiguous_code), transition);
     }
 
     fn collapse_missing(&mut self, transition: f32) {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            self.collapse_avx2::<2>(0, false, 0, transition);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
         self.collapse(0, None, None, transition);
     }
 
+    #[cfg(not(target_arch = "x86_64"))]
     fn collapse(
         &mut self,
         relative_locus: usize,
@@ -987,58 +1362,60 @@ impl SingleEngine<'_> {
         ambiguous_code: Option<u8>,
         transition: f32,
     ) {
-        #[cfg(target_arch = "x86_64")]
-        {
-            // The enclosing SHAPEIT common-phasing binary already requires AVX2 and FMA.
-            unsafe {
-                self.collapse_avx2(relative_locus, genotype_allele, ambiguous_code, transition);
-            }
-            return;
-        }
-
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            debug_assert_eq!(self.prob_haps, HAPLOTYPES);
-            let transferred = transition / self.conditioning_haplotypes as f32;
-            let stay_factor = (1.0 - transition) / self.prob_sum_t;
-            let mut sums = [0.0f32; HAPLOTYPES];
-            for k in 0..self.conditioning_haplotypes {
-                let allele = if genotype_allele.is_some() || ambiguous_code.is_some() {
-                    self.allele(relative_locus, k)
+        debug_assert_eq!(self.prob_haps, HAPLOTYPES);
+        let transferred = transition / self.conditioning_haplotypes as f32;
+        let stay_factor = (1.0 - transition) / self.prob_sum_t;
+        let mut sums = [0.0f32; HAPLOTYPES];
+        for k in 0..self.conditioning_haplotypes {
+            let allele = if genotype_allele.is_some() || ambiguous_code.is_some() {
+                self.allele(relative_locus, k)
+            } else {
+                false
+            };
+            let base = self.prob_sum_k[k].mul_add(stay_factor, transferred);
+            let start = k * HAPLOTYPES;
+            for h in 0..HAPLOTYPES {
+                let graph_haplotype =
+                    genotype_allele.or_else(|| ambiguous_code.map(|code| ((code >> h) & 1) != 0));
+                let emission = if graph_haplotype.is_some_and(|graph| graph != allele) {
+                    self.mismatch
                 } else {
-                    false
+                    1.0
                 };
-                let base = self.prob_sum_k[k].mul_add(stay_factor, transferred);
-                let start = k * HAPLOTYPES;
-                for h in 0..HAPLOTYPES {
-                    let graph_haplotype = genotype_allele
-                        .or_else(|| ambiguous_code.map(|code| ((code >> h) & 1) != 0));
-                    let emission = if graph_haplotype.is_some_and(|graph| graph != allele) {
-                        self.mismatch
-                    } else {
-                        1.0
-                    };
-                    let value = base * emission;
-                    self.prob[start + h] = value;
-                    sums[h] += value;
-                }
+                let value = base * emission;
+                self.prob[start + h] = value;
+                sums[h] += value;
             }
-            self.update_total(&sums, HAPLOTYPES);
         }
+        self.update_total(&sums, HAPLOTYPES);
     }
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,fma")]
-    unsafe fn collapse_avx2(
+    unsafe fn collapse_avx2<const KIND: u8>(
         &mut self,
         relative_locus: usize,
-        genotype_allele: Option<bool>,
-        ambiguous_code: Option<u8>,
+        genotype_allele: bool,
+        ambiguous_code: u8,
         transition: f32,
     ) {
+        debug_assert!(KIND <= 2);
         debug_assert_eq!(self.prob_haps, HAPLOTYPES);
         let transferred = _mm256_set1_ps(transition / self.conditioning_haplotypes as f32);
         let stay = _mm256_set1_ps((1.0 - transition) / self.prob_sum_t);
+        let ones = _mm256_set1_ps(1.0);
+        let mismatch = _mm256_set1_ps(self.mismatch);
+        let mut emission_zero_lanes = [1.0f32; HAPLOTYPES];
+        let mut emission_one_lanes = [1.0f32; HAPLOTYPES];
+        for haplotype in 0..HAPLOTYPES {
+            if ((ambiguous_code >> haplotype) & 1) != 0 {
+                emission_zero_lanes[haplotype] = self.mismatch;
+            } else {
+                emission_one_lanes[haplotype] = self.mismatch;
+            }
+        }
+        let emission_zero = _mm256_loadu_ps(emission_zero_lanes.as_ptr());
+        let emission_one = _mm256_loadu_ps(emission_one_lanes.as_ptr());
         let mut vector_sums: [__m256; HAPLOTYPES] = [
             _mm256_setzero_ps(),
             _mm256_setzero_ps(),
@@ -1052,30 +1429,34 @@ impl SingleEngine<'_> {
         let probability = self.prob.as_mut_ptr();
         let row = relative_locus + self.locus_offset;
         let allele_bytes = self.haplotypes.as_ptr().add(row * self.haplotype_stride);
-        let uses_alleles = genotype_allele.is_some() || ambiguous_code.is_some();
         let mut k = 0usize;
         let mut probability_index = 0usize;
 
         while k + 7 < self.conditioning_haplotypes {
-            let packed = if uses_alleles {
+            let packed = if KIND < 2 {
                 *allele_bytes.add(k >> 3)
             } else {
                 0
             };
             for lane in 0..HAPLOTYPES {
                 let conditioning_allele = ((packed >> (7 - lane)) & 1) != 0;
-                let mut emission_lanes = [1.0f32; HAPLOTYPES];
-                for haplotype in 0..HAPLOTYPES {
-                    let graph_haplotype = genotype_allele
-                        .or_else(|| ambiguous_code.map(|code| ((code >> haplotype) & 1) != 0));
-                    if graph_haplotype.is_some_and(|graph| graph != conditioning_allele) {
-                        emission_lanes[haplotype] = self.mismatch;
-                    }
+                let mut value =
+                    _mm256_fmadd_ps(_mm256_set1_ps(self.prob_sum_k[k + lane]), stay, transferred);
+                if KIND == 0 {
+                    let emission = if genotype_allele != conditioning_allele {
+                        mismatch
+                    } else {
+                        ones
+                    };
+                    value = _mm256_mul_ps(value, emission);
+                } else if KIND == 1 {
+                    let emission = if conditioning_allele {
+                        emission_one
+                    } else {
+                        emission_zero
+                    };
+                    value = _mm256_mul_ps(value, emission);
                 }
-                let value = _mm256_mul_ps(
-                    _mm256_fmadd_ps(_mm256_set1_ps(self.prob_sum_k[k + lane]), stay, transferred),
-                    _mm256_loadu_ps(emission_lanes.as_ptr()),
-                );
                 vector_sums[lane] = _mm256_add_ps(vector_sums[lane], value);
                 _mm256_storeu_ps(probability.add(probability_index), value);
                 probability_index += HAPLOTYPES;
@@ -1084,23 +1465,27 @@ impl SingleEngine<'_> {
         }
 
         while k < self.conditioning_haplotypes {
-            let conditioning_allele = if uses_alleles {
+            let conditioning_allele = if KIND < 2 {
                 ((*allele_bytes.add(k >> 3) >> (7 - (k & 7))) & 1) != 0
             } else {
                 false
             };
-            let mut emission_lanes = [1.0f32; HAPLOTYPES];
-            for haplotype in 0..HAPLOTYPES {
-                let graph_haplotype = genotype_allele
-                    .or_else(|| ambiguous_code.map(|code| ((code >> haplotype) & 1) != 0));
-                if graph_haplotype.is_some_and(|graph| graph != conditioning_allele) {
-                    emission_lanes[haplotype] = self.mismatch;
-                }
+            let mut value = _mm256_fmadd_ps(_mm256_set1_ps(self.prob_sum_k[k]), stay, transferred);
+            if KIND == 0 {
+                let emission = if genotype_allele != conditioning_allele {
+                    mismatch
+                } else {
+                    ones
+                };
+                value = _mm256_mul_ps(value, emission);
+            } else if KIND == 1 {
+                let emission = if conditioning_allele {
+                    emission_one
+                } else {
+                    emission_zero
+                };
+                value = _mm256_mul_ps(value, emission);
             }
-            let value = _mm256_mul_ps(
-                _mm256_fmadd_ps(_mm256_set1_ps(self.prob_sum_k[k]), stay, transferred),
-                _mm256_loadu_ps(emission_lanes.as_ptr()),
-            );
             vector_sums[0] = _mm256_add_ps(vector_sums[0], value);
             _mm256_storeu_ps(probability.add(probability_index), value);
             probability_index += HAPLOTYPES;
@@ -1161,7 +1546,6 @@ impl SingleEngine<'_> {
     }
 }
 
-#[cfg(feature = "experimental-single-hmm")]
 impl SingleEngine<'_> {
     fn transition_haplotypes(&mut self, relative_segment: usize, previous_locus: usize) -> bool {
         let alpha_segment = relative_segment - 1;
@@ -1562,7 +1946,6 @@ impl SingleEngine<'_> {
     }
 }
 
-#[cfg(feature = "experimental-single-hmm")]
 impl SingleEngine<'_> {
     fn forward(&mut self) {
         let mut segment = self.segment_first;
@@ -1754,7 +2137,6 @@ impl SingleEngine<'_> {
     }
 }
 #[no_mangle]
-#[cfg(feature = "experimental-single-hmm")]
 /// Return the caller-owned workspaces required by one single-precision window.
 ///
 /// # Safety
@@ -1825,19 +2207,10 @@ pub unsafe extern "C" fn shapeit_hmm_single_scratch_len_v1(
     *index_scratch_length = layout.index_total;
     STATUS_OK
 }
-#[no_mangle]
-#[cfg(feature = "experimental-single-hmm")]
-/// Run one complete single-precision common-phasing HMM window.
-///
-/// # Safety
-///
-/// `parameters` and `outcome` must be valid for their types. Every non-empty
-/// buffer in `parameters` must be valid for its stated length. Mutable buffers
-/// must not overlap each other or any input buffer. Invalid layouts are
-/// reported before any caller-owned phasing output is written.
-pub unsafe extern "C" fn shapeit_hmm_run_segment_single_v1(
+unsafe fn run_segment_single_v1_impl(
     parameters: *const HmmSegmentSingleV1,
     outcome: *mut i32,
+    prevalidated: bool,
 ) -> u32 {
     if parameters.is_null() || outcome.is_null() {
         return STATUS_NULL_POINTER;
@@ -1871,8 +2244,12 @@ pub unsafe extern "C" fn shapeit_hmm_run_segment_single_v1(
         parameters.segment_lengths_length,
     );
     let diplotypes = const_slice(parameters.diplotypes, parameters.diplotypes_length);
-    let shadow = single_validation_shadow(parameters);
-    let validated = match validate(&shadow, variants, segment_lengths, diplotypes) {
+    let validated = match if prevalidated {
+        single_prevalidated_layout(parameters)
+    } else {
+        let shadow = single_validation_shadow(parameters);
+        validate(&shadow, variants, segment_lengths, diplotypes)
+    } {
         Ok(value) => value,
         Err(status) => return status,
     };
@@ -2013,13 +2390,45 @@ pub unsafe extern "C" fn shapeit_hmm_run_segment_single_v1(
     *outcome = engine.run();
     STATUS_OK
 }
+
+#[no_mangle]
+/// Run one complete single-precision common-phasing HMM window.
+///
+/// # Safety
+///
+/// `parameters` and `outcome` must be valid for their types. Every non-empty
+/// buffer in `parameters` must be valid for its stated length. Mutable buffers
+/// must not overlap each other or any input buffer. Invalid layouts are
+/// reported before any caller-owned phasing output is written.
+pub unsafe extern "C" fn shapeit_hmm_run_segment_single_v1(
+    parameters: *const HmmSegmentSingleV1,
+    outcome: *mut i32,
+) -> u32 {
+    run_segment_single_v1_impl(parameters, outcome, false)
+}
+
+#[no_mangle]
+/// Run a single-precision HMM window whose layout was already validated.
+///
+/// # Safety
+///
+/// In addition to the requirements of `shapeit_hmm_run_segment_single_v1`,
+/// every coordinate and buffer length must describe a valid, mutually
+/// consistent HMM window. This entry point performs only constant-time pointer
+/// and workspace checks before accessing caller-owned buffers.
+pub unsafe extern "C" fn shapeit_hmm_run_segment_single_prevalidated_v1(
+    parameters: *const HmmSegmentSingleV1,
+    outcome: *mut i32,
+) -> u32 {
+    run_segment_single_v1_impl(parameters, outcome, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use core::ptr;
 
     #[test]
-    #[cfg(feature = "experimental-single-hmm")]
     fn single_precision_locus_normalizes_first_diplotypes() {
         let variants = [0u8];
         let lengths = [1u16];
