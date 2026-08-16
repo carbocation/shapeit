@@ -66,6 +66,14 @@ transition and missing probabilities, and storage-event count. Final solving
 borrows it directly, while the graph writer receives a read-only view using the
 legacy LSB-first mask encoding.
 
+Pedigree scaffolding and the established haploid-heterozygote reset operate on
+whole packed samples through checked Rust calls. `shapeit_genotype_prune_v1`
+owns a complete graph-pruning round: it ranks transition mass, selects
+non-adjacent merges, rebuilds ambiguity and diplotype encodings, and recomputes
+the transition count. Equal probabilities and entropies use original indexes as
+stable tie-breakers, so pruning does not inherit implementation-defined sort
+ordering.
+
 The whole target-haplotype refresh is likewise a single checked Rust call. It
 decodes every sample's packed genotype variants directly into the haplotype-
 major bitmatrix while preserving fixed homozygous and scaffolded loci between

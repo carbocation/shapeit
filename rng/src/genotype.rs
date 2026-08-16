@@ -344,6 +344,323 @@ fn byte_ranges_overlap(
     Ok(first_start < second_stop && second_start < first_stop)
 }
 
+struct PrunedGraph {
+    ambiguous: Vec<u8>,
+    diplotypes: Vec<u64>,
+    segment_lengths: Vec<u16>,
+    transition_count: u32,
+}
+
+#[derive(Clone, Copy)]
+struct PruneStatistic {
+    entropy: f64,
+    segment: usize,
+    mergeable: bool,
+}
+
+fn collect_diplotypes(mask: u64) -> Vec<u8> {
+    let mut codes = Vec::with_capacity(mask.count_ones() as usize);
+    let mut active = mask;
+    while active != 0 {
+        codes.push(active.trailing_zeros() as u8);
+        active &= active - 1;
+    }
+    codes
+}
+
+fn rank_transitions(probabilities: &[f64], order: &mut Vec<usize>) {
+    order.clear();
+    order.extend(0..probabilities.len());
+    order.sort_unstable_by(|&first, &second| {
+        probabilities[second]
+            .total_cmp(&probabilities[first])
+            .then_with(|| first.cmp(&second))
+    });
+}
+
+fn map_prune_merges(
+    variants: &[u8],
+    diplotypes: &[u64],
+    segment_lengths: &[u16],
+    transition_probabilities: &[f64],
+    threshold_probability_mass: f64,
+) -> Vec<bool> {
+    let mut statistics = Vec::with_capacity(diplotypes.len().saturating_sub(1));
+    let mut transition_order = Vec::with_capacity(4096);
+    let mut previous_diplotypes = collect_diplotypes(diplotypes[0]);
+    let mut transition_offset = previous_diplotypes.len();
+    let mut locus_offset = 0usize;
+
+    for segment in 1..diplotypes.len() {
+        let current_diplotypes = collect_diplotypes(diplotypes[segment]);
+        let transition_count = previous_diplotypes.len() * current_diplotypes.len();
+        let mut statistic = PruneStatistic {
+            entropy: 4096.0,
+            segment,
+            mergeable: false,
+        };
+        let merged_length =
+            usize::from(segment_lengths[segment - 1]) + usize::from(segment_lengths[segment]);
+        if merged_length < usize::from(u16::MAX) {
+            let merged_ambiguous = (locus_offset..locus_offset + merged_length)
+                .filter(|&locus| graph_code(variant_nibble(variants, locus)) > 1)
+                .count();
+            if merged_ambiguous < MAX_AMBIGUOUS_PER_SEGMENT {
+                let probabilities = &transition_probabilities
+                    [transition_offset..transition_offset + transition_count];
+                rank_transitions(probabilities, &mut transition_order);
+                statistic.entropy = transition_order.iter().fold(0.0, |entropy, &index| {
+                    let probability = probabilities[index];
+                    let information = if probability == 0.0 {
+                        0.0
+                    } else {
+                        -probability.log10()
+                    };
+                    entropy + probability * information
+                });
+
+                let mut mapped_haplotypes = [-1i16; 64];
+                let mut haplotype_count = 0i16;
+                let mut cumulative_probability = 0.0;
+                for &index in &transition_order {
+                    cumulative_probability += probabilities[index];
+                    let previous =
+                        usize::from(previous_diplotypes[index / current_diplotypes.len()]);
+                    let current = usize::from(current_diplotypes[index % current_diplotypes.len()]);
+                    let merged_haplotype0 = (previous >> 3) * 8 + (current >> 3);
+                    let merged_haplotype1 = (previous & 7) * 8 + (current & 7);
+                    if mapped_haplotypes[merged_haplotype0] < 0 {
+                        mapped_haplotypes[merged_haplotype0] = haplotype_count;
+                        haplotype_count += 1;
+                    }
+                    if merged_haplotype0 != merged_haplotype1
+                        && mapped_haplotypes[merged_haplotype1] < 0
+                    {
+                        mapped_haplotypes[merged_haplotype1] = haplotype_count;
+                        haplotype_count += 1;
+                    }
+                    if haplotype_count == 8 && cumulative_probability > threshold_probability_mass {
+                        statistic.mergeable = true;
+                    }
+                }
+            }
+        }
+        statistics.push(statistic);
+        locus_offset += usize::from(segment_lengths[segment - 1]);
+        transition_offset += transition_count;
+        previous_diplotypes = current_diplotypes;
+    }
+
+    statistics.sort_unstable_by(|first, second| {
+        first
+            .entropy
+            .total_cmp(&second.entropy)
+            .then_with(|| first.segment.cmp(&second.segment))
+    });
+    let mut merge_flags = vec![false; diplotypes.len() + 1];
+    for statistic in statistics {
+        let no_adjacent_merges =
+            !merge_flags[statistic.segment - 1] && !merge_flags[statistic.segment + 1];
+        merge_flags[statistic.segment] = no_adjacent_merges && statistic.mergeable;
+    }
+    merge_flags
+}
+
+fn copy_ambiguous_segment(
+    variants: &[u8],
+    ambiguous: &[u8],
+    output: &mut [u8],
+    locus_offset: usize,
+    locus_count: usize,
+    ambiguous_offset: usize,
+) {
+    let mut relative_ambiguous = 0usize;
+    for locus in locus_offset..locus_offset + locus_count {
+        if graph_code(variant_nibble(variants, locus)) > 1 {
+            output[ambiguous_offset + relative_ambiguous] =
+                ambiguous[ambiguous_offset + relative_ambiguous];
+            relative_ambiguous += 1;
+        }
+    }
+}
+
+fn count_graph_transitions(diplotypes: &[u64]) -> Result<u32, u32> {
+    let mut previous_count = 1usize;
+    let mut transition_count = 0usize;
+    for &mask in diplotypes {
+        let current_count = mask.count_ones() as usize;
+        if current_count == 0 {
+            return Err(STATUS_INVALID_DIMENSIONS);
+        }
+        transition_count = transition_count
+            .checked_add(
+                previous_count
+                    .checked_mul(current_count)
+                    .ok_or(STATUS_INTEGER_OVERFLOW)?,
+            )
+            .ok_or(STATUS_INTEGER_OVERFLOW)?;
+        previous_count = current_count;
+    }
+    u32::try_from(transition_count).map_err(|_| STATUS_INTEGER_OVERFLOW)
+}
+
+fn prune_graph(
+    variants: &[u8],
+    ambiguous: &[u8],
+    diplotypes: &[u64],
+    segment_lengths: &[u16],
+    transition_probabilities: &[f64],
+    threshold_probability_mass: f64,
+) -> Result<PrunedGraph, u32> {
+    let merge_flags = map_prune_merges(
+        variants,
+        diplotypes,
+        segment_lengths,
+        transition_probabilities,
+        threshold_probability_mass,
+    );
+    let merge_count = merge_flags.iter().filter(|&&merge| merge).count();
+    let mut output_ambiguous = vec![0u8; ambiguous.len()];
+    let mut output_diplotypes = Vec::with_capacity(diplotypes.len() - merge_count);
+    let mut output_segment_lengths = Vec::with_capacity(diplotypes.len() - merge_count);
+    let mut transition_order = Vec::with_capacity(4096);
+    let mut previous_diplotypes = collect_diplotypes(diplotypes[0]);
+    let mut transition_offset = previous_diplotypes.len();
+    let mut ambiguous_offset = 0usize;
+    let mut locus_offset = 0usize;
+
+    for segment in 1..diplotypes.len() {
+        let current_diplotypes = collect_diplotypes(diplotypes[segment]);
+        let transition_count = previous_diplotypes.len() * current_diplotypes.len();
+        if merge_flags[segment] {
+            let previous_length = usize::from(segment_lengths[segment - 1]);
+            let merged_length = previous_length + usize::from(segment_lengths[segment]);
+            output_segment_lengths.push(merged_length as u16);
+            let probabilities =
+                &transition_probabilities[transition_offset..transition_offset + transition_count];
+            rank_transitions(probabilities, &mut transition_order);
+            let mut mapped_haplotypes = [-1i16; 64];
+            let mut haplotype_count = 0usize;
+            let mut output_mask = 0u64;
+            for &index in &transition_order {
+                let previous = usize::from(previous_diplotypes[index / current_diplotypes.len()]);
+                let current = usize::from(current_diplotypes[index % current_diplotypes.len()]);
+                let previous_haplotype0 = previous >> 3;
+                let previous_haplotype1 = previous & 7;
+                let current_haplotype0 = current >> 3;
+                let current_haplotype1 = current & 7;
+                let merged_haplotype0 = previous_haplotype0 * 8 + current_haplotype0;
+                let merged_haplotype1 = previous_haplotype1 * 8 + current_haplotype1;
+                let new_haplotype0 = mapped_haplotypes[merged_haplotype0] < 0;
+                let new_haplotype1 = merged_haplotype0 != merged_haplotype1
+                    && mapped_haplotypes[merged_haplotype1] < 0;
+                if haplotype_count + usize::from(new_haplotype0) + usize::from(new_haplotype1) <= 8
+                {
+                    if new_haplotype0 {
+                        mapped_haplotypes[merged_haplotype0] = haplotype_count as i16;
+                        let mut relative_ambiguous = 0usize;
+                        for relative_locus in 0..merged_length {
+                            let locus = locus_offset + relative_locus;
+                            if graph_code(variant_nibble(variants, locus)) > 1 {
+                                let source_haplotype = if relative_locus < previous_length {
+                                    previous_haplotype0
+                                } else {
+                                    current_haplotype0
+                                };
+                                if (ambiguous[ambiguous_offset + relative_ambiguous]
+                                    >> source_haplotype)
+                                    & 1
+                                    != 0
+                                {
+                                    output_ambiguous[ambiguous_offset + relative_ambiguous] |=
+                                        1 << haplotype_count;
+                                }
+                                relative_ambiguous += 1;
+                            }
+                        }
+                        haplotype_count += 1;
+                    }
+                    if new_haplotype1 {
+                        mapped_haplotypes[merged_haplotype1] = haplotype_count as i16;
+                        let mut relative_ambiguous = 0usize;
+                        for relative_locus in 0..merged_length {
+                            let locus = locus_offset + relative_locus;
+                            if graph_code(variant_nibble(variants, locus)) > 1 {
+                                let source_haplotype = if relative_locus < previous_length {
+                                    previous_haplotype1
+                                } else {
+                                    current_haplotype1
+                                };
+                                if (ambiguous[ambiguous_offset + relative_ambiguous]
+                                    >> source_haplotype)
+                                    & 1
+                                    != 0
+                                {
+                                    output_ambiguous[ambiguous_offset + relative_ambiguous] |=
+                                        1 << haplotype_count;
+                                }
+                                relative_ambiguous += 1;
+                            }
+                        }
+                        haplotype_count += 1;
+                    }
+                    let mapped0 = mapped_haplotypes[merged_haplotype0];
+                    let mapped1 = mapped_haplotypes[merged_haplotype1];
+                    if mapped0 < 0 || mapped1 < 0 {
+                        return Err(STATUS_INVALID_DIMENSIONS);
+                    }
+                    output_mask |= 1u64
+                        << (usize::try_from(mapped0).unwrap() * 8
+                            + usize::try_from(mapped1).unwrap());
+                }
+            }
+            if haplotype_count != 8 {
+                return Err(STATUS_INVALID_DIMENSIONS);
+            }
+            output_diplotypes.push(output_mask);
+        } else if !merge_flags[segment - 1] {
+            copy_ambiguous_segment(
+                variants,
+                ambiguous,
+                &mut output_ambiguous,
+                locus_offset,
+                usize::from(segment_lengths[segment - 1]),
+                ambiguous_offset,
+            );
+            output_segment_lengths.push(segment_lengths[segment - 1]);
+            output_diplotypes.push(diplotypes[segment - 1]);
+        }
+
+        let previous_length = usize::from(segment_lengths[segment - 1]);
+        ambiguous_offset += (locus_offset..locus_offset + previous_length)
+            .filter(|&locus| graph_code(variant_nibble(variants, locus)) > 1)
+            .count();
+        locus_offset += previous_length;
+        transition_offset += transition_count;
+        previous_diplotypes = current_diplotypes;
+    }
+
+    if !merge_flags[diplotypes.len() - 1] {
+        copy_ambiguous_segment(
+            variants,
+            ambiguous,
+            &mut output_ambiguous,
+            locus_offset,
+            usize::from(*segment_lengths.last().unwrap()),
+            ambiguous_offset,
+        );
+        output_segment_lengths.push(*segment_lengths.last().unwrap());
+        output_diplotypes.push(*diplotypes.last().unwrap());
+    }
+    let transition_count = count_graph_transitions(&output_diplotypes)?;
+    Ok(PrunedGraph {
+        ambiguous: output_ambiguous,
+        diplotypes: output_diplotypes,
+        segment_lengths: output_segment_lengths,
+        transition_count,
+    })
+}
+
 fn graph_sizes(variants: &[u8], variant_count: usize) -> GraphSizes {
     let mut relative_unfolded = 0usize;
     let mut relative_variants = 0usize;
@@ -1352,6 +1669,146 @@ pub unsafe extern "C" fn shapeit_genotype_reset_haploid_hets_v1(
 }
 
 #[no_mangle]
+/// Select and perform one complete round of genotype-graph pruning.
+///
+/// Equal transition probabilities and equal segment entropies are ordered by
+/// their original indexes, making the result independent of sort implementation
+/// details. The output capacities may equal their corresponding input lengths.
+///
+/// # Safety
+///
+/// Input buffers must be readable and output buffers writable for their stated
+/// lengths. No output buffer may overlap an input or another output buffer.
+pub unsafe extern "C" fn shapeit_genotype_prune_v1(
+    variants: *const u8,
+    variants_length: usize,
+    variant_count: usize,
+    ambiguous: *const u8,
+    ambiguous_length: usize,
+    diplotypes: *const u64,
+    diplotypes_length: usize,
+    segment_lengths: *const u16,
+    segment_lengths_length: usize,
+    transition_probabilities: *const f64,
+    transition_probabilities_length: usize,
+    threshold_probability_mass: f64,
+    output_ambiguous: *mut u8,
+    output_ambiguous_length: usize,
+    output_diplotypes: *mut u64,
+    output_diplotypes_capacity: usize,
+    output_segment_lengths: *mut u16,
+    output_segment_lengths_capacity: usize,
+    output_segment_count: *mut usize,
+    output_transition_count: *mut u32,
+) -> u32 {
+    if output_segment_count.is_null() || output_transition_count.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let required_variants = match required_variant_bytes(variant_count) {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
+    if required_variants > variants_length {
+        return STATUS_OUT_OF_BOUNDS;
+    }
+    if diplotypes_length == 0 || diplotypes_length != segment_lengths_length {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    if output_ambiguous_length < ambiguous_length
+        || output_diplotypes_capacity < diplotypes_length
+        || output_segment_lengths_capacity < diplotypes_length
+    {
+        return STATUS_OUT_OF_BOUNDS;
+    }
+    if (required_variants != 0 && variants.is_null())
+        || (ambiguous_length != 0 && ambiguous.is_null())
+        || diplotypes.is_null()
+        || segment_lengths.is_null()
+        || (transition_probabilities_length != 0 && transition_probabilities.is_null())
+        || (ambiguous_length != 0 && output_ambiguous.is_null())
+        || output_diplotypes.is_null()
+        || output_segment_lengths.is_null()
+    {
+        return STATUS_NULL_POINTER;
+    }
+
+    let variants = if required_variants == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(variants, required_variants)
+    };
+    let ambiguous = if ambiguous_length == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(ambiguous, ambiguous_length)
+    };
+    let diplotypes = slice::from_raw_parts(diplotypes, diplotypes_length);
+    let segment_lengths = slice::from_raw_parts(segment_lengths, segment_lengths_length);
+    let transition_probabilities = if transition_probabilities_length == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(transition_probabilities, transition_probabilities_length)
+    };
+    let mut loci = 0usize;
+    for &length in segment_lengths {
+        if length == 0 {
+            return STATUS_INVALID_DIMENSIONS;
+        }
+        loci = match loci.checked_add(usize::from(length)) {
+            Some(value) => value,
+            None => return STATUS_INTEGER_OVERFLOW,
+        };
+    }
+    if loci != variant_count {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    let expected_ambiguous = (0..variant_count)
+        .filter(|&locus| graph_code(variant_nibble(variants, locus)) > 1)
+        .count();
+    if expected_ambiguous != ambiguous_length {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    let expected_transitions = match count_graph_transitions(diplotypes) {
+        Ok(value) => value as usize,
+        Err(status) => return status,
+    };
+    if expected_transitions != transition_probabilities_length {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    if transition_probabilities
+        .iter()
+        .any(|probability| !probability.is_finite() || *probability < 0.0)
+    {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+
+    let output = match prune_graph(
+        variants,
+        ambiguous,
+        diplotypes,
+        segment_lengths,
+        transition_probabilities,
+        threshold_probability_mass,
+    ) {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
+    if !output.ambiguous.is_empty() {
+        let destination = slice::from_raw_parts_mut(output_ambiguous, output_ambiguous_length);
+        destination[..output.ambiguous.len()].copy_from_slice(&output.ambiguous);
+    }
+    let output_diplotype_slice =
+        slice::from_raw_parts_mut(output_diplotypes, output_diplotypes_capacity);
+    output_diplotype_slice[..output.diplotypes.len()].copy_from_slice(&output.diplotypes);
+    let output_length_slice =
+        slice::from_raw_parts_mut(output_segment_lengths, output_segment_lengths_capacity);
+    output_length_slice[..output.segment_lengths.len()].copy_from_slice(&output.segment_lengths);
+    *output_segment_count = output.diplotypes.len();
+    *output_transition_count = output.transition_count;
+    STATUS_OK
+}
+
+#[no_mangle]
 /// Sample one complete genotype graph and update its packed haplotype alleles.
 ///
 /// RNG coordinates identify a fresh logical Philox stream. The function
@@ -2003,6 +2460,87 @@ mod tests {
         assert_eq!(status, STATUS_OK);
         assert_eq!(variants, pack(&[3, 3, 0, 1]));
         assert_eq!(reset_count, 2);
+    }
+
+    #[test]
+    fn pruning_merges_eight_ranked_haplotypes_and_preserves_tie_order() {
+        let variants = pack(&[2, 2]);
+        let ambiguous = [0xaau8, 0xcc];
+        let diagonal = (0..8).fold(0u64, |mask, haplotype| {
+            mask | (1u64 << (haplotype * 8 + haplotype))
+        });
+        let diplotypes = [diagonal, diagonal];
+        let lengths = [1u16, 1u16];
+        let mut probabilities = vec![0.0f64; 72];
+        for haplotype in 0..8 {
+            probabilities[8 + haplotype * 8 + haplotype] = 0.125;
+        }
+        let mut output_ambiguous = [0u8; 2];
+        let mut output_diplotypes = [0u64; 2];
+        let mut output_lengths = [0u16; 2];
+        let mut output_segments = 0usize;
+        let mut output_transitions = 0u32;
+        let status = unsafe {
+            shapeit_genotype_prune_v1(
+                variants.as_ptr(),
+                variants.len(),
+                2,
+                ambiguous.as_ptr(),
+                ambiguous.len(),
+                diplotypes.as_ptr(),
+                diplotypes.len(),
+                lengths.as_ptr(),
+                lengths.len(),
+                probabilities.as_ptr(),
+                probabilities.len(),
+                0.999,
+                output_ambiguous.as_mut_ptr(),
+                output_ambiguous.len(),
+                output_diplotypes.as_mut_ptr(),
+                output_diplotypes.len(),
+                output_lengths.as_mut_ptr(),
+                output_lengths.len(),
+                &mut output_segments,
+                &mut output_transitions,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(output_ambiguous, ambiguous);
+        assert_eq!(output_diplotypes[0], diagonal);
+        assert_eq!(output_lengths[0], 2);
+        assert_eq!(output_segments, 1);
+        assert_eq!(output_transitions, 8);
+
+        let status = unsafe {
+            shapeit_genotype_prune_v1(
+                variants.as_ptr(),
+                variants.len(),
+                2,
+                ambiguous.as_ptr(),
+                ambiguous.len(),
+                diplotypes.as_ptr(),
+                diplotypes.len(),
+                lengths.as_ptr(),
+                lengths.len(),
+                probabilities.as_ptr(),
+                probabilities.len(),
+                1.0,
+                output_ambiguous.as_mut_ptr(),
+                output_ambiguous.len(),
+                output_diplotypes.as_mut_ptr(),
+                output_diplotypes.len(),
+                output_lengths.as_mut_ptr(),
+                output_lengths.len(),
+                &mut output_segments,
+                &mut output_transitions,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(output_ambiguous, ambiguous);
+        assert_eq!(output_diplotypes, diplotypes);
+        assert_eq!(output_lengths, lengths);
+        assert_eq!(output_segments, 2);
+        assert_eq!(output_transitions, 72);
     }
 
     #[test]

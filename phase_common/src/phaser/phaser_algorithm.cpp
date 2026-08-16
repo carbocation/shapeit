@@ -97,13 +97,11 @@ void phaser::phaseWindow(int id_worker, int id_job) {
 	if (options["thread"].as < int > () > 1) pthread_mutex_unlock(&mutex_workers);
 
 	//Sampling / Merging / Storing
-	vector < bool > flagMerges;
 	switch (iteration_types[iteration_stage]) {
 	case STAGE_BURN:	G.vecG[id_job]->sample(threadData[id_worker].T, threadData[id_worker].M, sample_rng);
 							break;
 	case STAGE_PRUN:	G.vecG[id_job]->sample(threadData[id_worker].T, threadData[id_worker].M, sample_rng);
-						G.vecG[id_job]->mapMerges(threadData[id_worker].T, options["mcmc-prune"].as < double > (), flagMerges);
-						G.vecG[id_job]->performMerges(threadData[id_worker].T, flagMerges);
+						G.vecG[id_job]->prune(threadData[id_worker].T, options["mcmc-prune"].as < double > ());
 						break;
 	case STAGE_MAIN:	G.vecG[id_job]->sample(threadData[id_worker].T, threadData[id_worker].M, sample_rng);
 						G.vecG[id_job]->store(threadData[id_worker].T, threadData[id_worker].M);

@@ -96,8 +96,7 @@ public:
 	void free();
 	void build();
 	void sample(std::vector < double > &, std::vector < float > &, random_number_generator &);
-	void mapMerges(std::vector < double > &, double , std::vector < bool > &);
-	void performMerges(std::vector < double > &, std::vector < bool > &);
+	void prune(std::vector < double > &, double);
 	void store(std::vector < double > &, std::vector < float > &);
 	void solve();
 	void scaffoldTrio(genotype *, genotype *, std::vector < unsigned int > &);

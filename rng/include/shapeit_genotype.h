@@ -86,6 +86,28 @@ uint32_t shapeit_genotype_reset_haploid_hets_v1(
     size_t variant_count,
     uint32_t * reset_count);
 
+uint32_t shapeit_genotype_prune_v1(
+    const uint8_t * variants,
+    size_t variants_length,
+    size_t variant_count,
+    const uint8_t * ambiguous,
+    size_t ambiguous_length,
+    const uint64_t * diplotypes,
+    size_t diplotypes_length,
+    const uint16_t * segment_lengths,
+    size_t segment_lengths_length,
+    const double * transition_probabilities,
+    size_t transition_probabilities_length,
+    double threshold_probability_mass,
+    uint8_t * output_ambiguous,
+    size_t output_ambiguous_length,
+    uint64_t * output_diplotypes,
+    size_t output_diplotypes_capacity,
+    uint16_t * output_segment_lengths,
+    size_t output_segment_lengths_capacity,
+    size_t * output_segment_count,
+    uint32_t * output_transition_count);
+
 uint32_t shapeit_genotype_sample_v1(
     uint8_t * variants,
     size_t variants_length,
