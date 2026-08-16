@@ -44,10 +44,6 @@ public:
 	genotype_set & G;
 	conditioning_set & H;
 
-	//Probabilities
-	std::vector < double > T;
-	std::vector < float > M;
-
 	//Windows
 	window_set Windows;
 
@@ -57,13 +53,14 @@ public:
 	shapeit_conditioning_job_v1 * Conditioning;
 	std::vector < uint8_t > Haploid;
 
-	compute_job(variant_map & , genotype_set & , conditioning_set & , unsigned int n_max_transitions , unsigned int n_max_missing);
+	compute_job(variant_map &, genotype_set &, conditioning_set &);
 	compute_job(const compute_job &);
 	~compute_job();
 
 	void free();
 	void make(unsigned int, double, random_number_generator &, random_number_generator &);
-	int runHMM(genotype *, bitmatrix &, hmm_parameters &, int &, int &);
+	int runPhase(genotype *, bitmatrix &, hmm_parameters &, unsigned int, double,
+		random_number_generator &, int &, int &);
 	unsigned int size();
 };
 

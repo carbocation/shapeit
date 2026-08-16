@@ -80,6 +80,8 @@ pub struct ConditioningJobV1 {
     pub(crate) double_scratch: Vec<f64>,
     pub(crate) alpha_locus_scratch: Vec<i32>,
     pub(crate) index_scratch: Vec<usize>,
+    pub(crate) transition_probabilities: Vec<f64>,
+    pub(crate) missing_probabilities: Vec<f32>,
 }
 
 struct ConditioningInputs<'a> {

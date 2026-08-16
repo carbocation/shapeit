@@ -61,9 +61,6 @@ public:
 	void allocateVariants(unsigned int);
 	void free();
 	void build();
-	void sample(std::vector < double > &, std::vector < float > &, random_number_generator &);
-	void prune(std::vector < double > &, double);
-	void store(std::vector < double > &, std::vector < float > &);
 	void solve();
 	void scaffoldTrio(genotype *, genotype *, std::vector < unsigned int > &);
 	void scaffoldDuoFather(genotype *, std::vector < unsigned int > &);

@@ -5,7 +5,10 @@ use core::{mem, slice};
 use self::single::{shapeit_hmm_run_segment_single_prevalidated_v1, HmmSegmentSingleV1};
 use crate::bitmatrix::shapeit_bitmatrix_subset_transpose_v1;
 use crate::conditioning::ConditioningJobV1;
-use crate::genotype::{GenotypeGraphV1, GenotypeWindowV1};
+use crate::genotype::{
+    shapeit_genotype_graph_prune_v1, shapeit_genotype_graph_sample_current_v1,
+    shapeit_genotype_graph_store_v1, GenotypeGraphV1, GenotypeWindowV1,
+};
 
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{
@@ -20,6 +23,9 @@ const STATUS_INVALID_DIMENSIONS: u32 = 2;
 const STATUS_OUT_OF_BOUNDS: u32 = 3;
 const STATUS_INTEGER_OVERFLOW: u32 = 4;
 const HAPLOTYPES: usize = 8;
+const STAGE_BURN: u32 = 0;
+const STAGE_PRUNE: u32 = 1;
+const STAGE_MAIN: u32 = 2;
 
 #[repr(C)]
 pub struct HmmSegmentDoubleV1 {
@@ -106,6 +112,33 @@ pub struct HmmJobResultV1 {
     underflow_recovered_precision: u32,
     fatal_outcome: i32,
     windows_completed: usize,
+}
+
+#[repr(C)]
+pub struct HmmPhaseJobV1 {
+    abi_version: u32,
+    struct_size: u32,
+    graph: *mut GenotypeGraphV1,
+    conditioning_job: *mut ConditioningJobV1,
+    haplotypes: *const u8,
+    haplotypes_length: usize,
+    haplotype_stride: usize,
+    centimorgans: *const f32,
+    centimorgans_length: usize,
+    recombination: *const f32,
+    recombination_length: usize,
+    rare_alleles: *const i8,
+    rare_alleles_length: usize,
+    effective_population_size: i32,
+    total_haplotypes: i32,
+    emission_match: f64,
+    emission_mismatch: f64,
+    stage: u32,
+    prune_threshold: f64,
+    sample_seed: u64,
+    sample_domain: u32,
+    sample_iteration: u32,
+    sample_item: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1552,6 +1585,130 @@ pub unsafe extern "C" fn shapeit_hmm_run_job_v1(
 }
 
 #[no_mangle]
+/// Run one complete common-phasing sample job, including its MCMC stage action.
+///
+/// Current transition and missing probabilities remain in reusable Rust-owned
+/// worker storage. On a successful HMM run the genotype graph is sampled, then
+/// optionally pruned or accumulated according to `stage`.
+///
+/// # Safety
+///
+/// `parameters` and `result` must be valid for their types. The opaque graph
+/// and conditioning job must be live and exclusively borrowed. Every other
+/// non-empty input buffer must be readable for its stated length.
+pub unsafe extern "C" fn shapeit_hmm_run_phase_job_v1(
+    parameters: *const HmmPhaseJobV1,
+    result: *mut HmmJobResultV1,
+) -> u32 {
+    if parameters.is_null() || result.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let parameters = &*parameters;
+    if parameters.abi_version != ABI_VERSION
+        || parameters.struct_size as usize != mem::size_of::<HmmPhaseJobV1>()
+        || parameters.stage > STAGE_MAIN
+        || (parameters.stage == STAGE_PRUNE
+            && (!parameters.prune_threshold.is_finite()
+                || parameters.prune_threshold < 0.0
+                || parameters.prune_threshold > 1.0))
+    {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    if parameters.graph.is_null() || parameters.conditioning_job.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let graph = &*parameters.graph;
+    if !graph.is_built() {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    let (_, transition_count, missing_count) = graph.hmm_dimensions();
+    let missing_probability_count = match missing_count.checked_mul(HAPLOTYPES) {
+        Some(value) => value,
+        None => return STATUS_INTEGER_OVERFLOW,
+    };
+
+    let conditioning_job = &mut *parameters.conditioning_job;
+    let mut transition_probabilities = mem::take(&mut conditioning_job.transition_probabilities);
+    let mut missing_probabilities = mem::take(&mut conditioning_job.missing_probabilities);
+    if transition_probabilities.len() < transition_count {
+        transition_probabilities.resize(transition_count, 0.0);
+    }
+    if missing_probabilities.len() < missing_probability_count {
+        missing_probabilities.resize(missing_probability_count, 0.0);
+    }
+
+    let hmm_parameters = HmmJobV1 {
+        abi_version: parameters.abi_version,
+        struct_size: mem::size_of::<HmmJobV1>() as u32,
+        graph: parameters.graph,
+        conditioning_job: parameters.conditioning_job,
+        haplotypes: parameters.haplotypes,
+        haplotypes_length: parameters.haplotypes_length,
+        haplotype_stride: parameters.haplotype_stride,
+        centimorgans: parameters.centimorgans,
+        centimorgans_length: parameters.centimorgans_length,
+        recombination: parameters.recombination,
+        recombination_length: parameters.recombination_length,
+        rare_alleles: parameters.rare_alleles,
+        rare_alleles_length: parameters.rare_alleles_length,
+        effective_population_size: parameters.effective_population_size,
+        total_haplotypes: parameters.total_haplotypes,
+        emission_match: parameters.emission_match,
+        emission_mismatch: parameters.emission_mismatch,
+        transition_probabilities: transition_probabilities.as_mut_ptr(),
+        transition_probabilities_length: transition_probabilities.len(),
+        missing_probabilities: missing_probabilities.as_mut_ptr(),
+        missing_probabilities_length: missing_probabilities.len(),
+    };
+    let mut local_result = HmmJobResultV1::default();
+    let hmm_status = shapeit_hmm_run_job_v1(&hmm_parameters, &mut local_result);
+    let operation_status = if hmm_status != STATUS_OK || local_result.fatal_outcome != 0 {
+        hmm_status
+    } else {
+        let sample_status = shapeit_genotype_graph_sample_current_v1(
+            parameters.graph,
+            transition_probabilities.as_ptr(),
+            transition_probabilities.len(),
+            missing_probabilities.as_ptr(),
+            missing_probabilities.len(),
+            parameters.sample_seed,
+            parameters.sample_domain,
+            parameters.sample_iteration,
+            parameters.sample_item,
+        );
+        if sample_status != STATUS_OK {
+            sample_status
+        } else {
+            match parameters.stage {
+                STAGE_BURN => STATUS_OK,
+                STAGE_PRUNE => shapeit_genotype_graph_prune_v1(
+                    parameters.graph,
+                    transition_probabilities.as_ptr(),
+                    transition_count,
+                    parameters.prune_threshold,
+                ),
+                STAGE_MAIN => shapeit_genotype_graph_store_v1(
+                    parameters.graph,
+                    transition_probabilities.as_ptr(),
+                    transition_count,
+                    missing_probabilities.as_ptr(),
+                    missing_probability_count,
+                ),
+                _ => STATUS_INVALID_DIMENSIONS,
+            }
+        }
+    };
+
+    let conditioning_job = &mut *parameters.conditioning_job;
+    conditioning_job.transition_probabilities = transition_probabilities;
+    conditioning_job.missing_probabilities = missing_probabilities;
+    if operation_status == STATUS_OK {
+        *result = local_result;
+    }
+    operation_status
+}
+
+#[no_mangle]
 pub extern "C" fn shapeit_hmm_abi_version() -> u32 {
     ABI_VERSION
 }
@@ -1783,6 +1940,39 @@ mod tests {
         assert!((transitions.iter().sum::<f64>() - 1.0).abs() < 1e-12);
         assert!(!conditioning_job.subset_haplotypes.is_empty());
         assert!(!conditioning_job.single_scratch.is_empty());
+
+        let phase_parameters = HmmPhaseJobV1 {
+            abi_version: ABI_VERSION,
+            struct_size: mem::size_of::<HmmPhaseJobV1>() as u32,
+            graph,
+            conditioning_job: &mut conditioning_job,
+            haplotypes: haplotypes.as_ptr(),
+            haplotypes_length: haplotypes.len(),
+            haplotype_stride: 1,
+            centimorgans: centimorgans.as_ptr(),
+            centimorgans_length: centimorgans.len(),
+            recombination: ptr::null(),
+            recombination_length: 0,
+            rare_alleles: rare_alleles.as_ptr(),
+            rare_alleles_length: rare_alleles.len(),
+            effective_population_size: 15_000,
+            total_haplotypes: 16,
+            emission_match: f64::from(0.9999f32),
+            emission_mismatch: f64::from(0.0001f32),
+            stage: STAGE_BURN,
+            prune_threshold: 0.999,
+            sample_seed: 15_052_011,
+            sample_domain: 2,
+            sample_iteration: 3,
+            sample_item: 4,
+        };
+        let mut phase_result = HmmJobResultV1::default();
+        let phase_status =
+            unsafe { shapeit_hmm_run_phase_job_v1(&phase_parameters, &mut phase_result) };
+        assert_eq!(phase_status, STATUS_OK);
+        assert_eq!(phase_result.fatal_outcome, 0);
+        assert_eq!(phase_result.windows_completed, 1);
+        assert_eq!(conditioning_job.transition_probabilities.len(), 64);
 
         unsafe { crate::genotype::shapeit_genotype_graph_free_v1(graph) };
     }

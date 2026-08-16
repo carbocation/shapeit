@@ -12,6 +12,10 @@
 #define SHAPEIT_HMM_STATUS_OUT_OF_BOUNDS 3U
 #define SHAPEIT_HMM_STATUS_INTEGER_OVERFLOW 4U
 
+#define SHAPEIT_HMM_STAGE_BURN 0U
+#define SHAPEIT_HMM_STAGE_PRUNE 1U
+#define SHAPEIT_HMM_STAGE_MAIN 2U
+
 typedef struct shapeit_genotype_graph_v1 shapeit_genotype_graph_v1;
 typedef struct shapeit_conditioning_job_v1 shapeit_conditioning_job_v1;
 
@@ -152,6 +156,32 @@ typedef struct {
     size_t windows_completed;
 } shapeit_hmm_job_result_v1;
 
+typedef struct {
+    uint32_t abi_version;
+    uint32_t struct_size;
+    shapeit_genotype_graph_v1 * graph;
+    shapeit_conditioning_job_v1 * conditioning_job;
+    const uint8_t * haplotypes;
+    size_t haplotypes_length;
+    size_t haplotype_stride;
+    const float * centimorgans;
+    size_t centimorgans_length;
+    const float * recombination;
+    size_t recombination_length;
+    const int8_t * rare_alleles;
+    size_t rare_alleles_length;
+    int32_t effective_population_size;
+    int32_t total_haplotypes;
+    double emission_match;
+    double emission_mismatch;
+    uint32_t stage;
+    double prune_threshold;
+    uint64_t sample_seed;
+    uint32_t sample_domain;
+    uint32_t sample_iteration;
+    uint64_t sample_item;
+} shapeit_hmm_phase_job_v1;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -160,6 +190,10 @@ uint32_t shapeit_hmm_abi_version(void);
 
 uint32_t shapeit_hmm_run_job_v1(
     const shapeit_hmm_job_v1 * parameters,
+    shapeit_hmm_job_result_v1 * result);
+
+uint32_t shapeit_hmm_run_phase_job_v1(
+    const shapeit_hmm_phase_job_v1 * parameters,
     shapeit_hmm_job_result_v1 * result);
 
 uint32_t shapeit_hmm_double_scratch_len_v1(

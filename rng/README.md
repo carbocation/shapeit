@@ -106,6 +106,12 @@ single-to-double underflow recovery, and the persistent precision decision.
 C++ retains progress statistics, error reporting, and iteration scheduling but
 no longer marshals or executes individual HMM segments.
 
+`shapeit_hmm_run_phase_job_v1` extends that boundary through the MCMC stage
+action. Current transition and missing probabilities live in reusable Rust
+worker storage; Rust samples the graph and performs burn-in, pruning, or main-
+iteration accumulation before returning. C++ no longer allocates probability
+buffers or calls separate sampling, pruning, and storage bridges per sample.
+
 ## IBD2 registry
 
 The opaque `shapeit_ibd2_tracks_v1` registry owns accumulated common-phasing

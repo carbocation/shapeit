@@ -57,8 +57,9 @@ void phaser::phaseWindow(int id_worker, int id_job) {
 	}
 
 	//Run all HMM windows inside the Rust-owned conditioning job
-	const int outcome = threadData[id_worker].runHMM(
-		G.vecG[id_job], H.H_opt_hap, M,
+	const int outcome = threadData[id_worker].runPhase(
+		G.vecG[id_job], H.H_opt_hap, M, iteration_types[iteration_stage],
+		options["mcmc-prune"].as < double > (), sample_rng,
 		underflow_recovered_summing, underflow_recovered_precision);
 	switch (outcome) {
 	case -2: vrb.error("Diploid underflow impossible to recover for [" + G.vecG[id_job]->name + "]");
@@ -72,17 +73,6 @@ void phaser::phaseWindow(int id_worker, int id_job) {
 	H.Kbanned.pushIBD2(id_job, threadData[id_worker].Kbanned);
 	if (options["thread"].as < int > () > 1) pthread_mutex_unlock(&mutex_workers);
 
-	//Sampling / Merging / Storing
-	switch (iteration_types[iteration_stage]) {
-	case STAGE_BURN:	G.vecG[id_job]->sample(threadData[id_worker].T, threadData[id_worker].M, sample_rng);
-							break;
-	case STAGE_PRUN:	G.vecG[id_job]->sample(threadData[id_worker].T, threadData[id_worker].M, sample_rng);
-						G.vecG[id_job]->prune(threadData[id_worker].T, options["mcmc-prune"].as < double > ());
-						break;
-	case STAGE_MAIN:	G.vecG[id_job]->sample(threadData[id_worker].T, threadData[id_worker].M, sample_rng);
-						G.vecG[id_job]->store(threadData[id_worker].T, threadData[id_worker].M);
-						break;
-	}
 }
 
 void phaser::phaseWindow() {

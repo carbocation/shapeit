@@ -32,17 +32,13 @@
 
 using namespace std;
 
-compute_job::compute_job(variant_map & _V, genotype_set & _G, conditioning_set & _H, unsigned int n_max_transitions, unsigned int n_max_missing) : V(_V), G(_G), H(_H) {
-	T = vector < double > (n_max_transitions, 0.0);
-	M = vector < float > (n_max_missing , 0.0);
+compute_job::compute_job(variant_map & _V, genotype_set & _G, conditioning_set & _H) : V(_V), G(_G), H(_H) {
 	Conditioning = nullptr;
 	Haploid = vector < uint8_t > (G.n_ind, 0);
 	for (int ind = 0 ; ind < G.n_ind ; ind ++) Haploid[ind] = G.vecG[ind]->isHaploid();
 }
 
 compute_job::compute_job(const compute_job & other) : V(other.V), G(other.G), H(other.H) {
-	T = other.T;
-	M = other.M;
 	Conditioning = nullptr;
 	Haploid = other.Haploid;
 }
@@ -57,8 +53,6 @@ void compute_job::free () {
 		shapeit_conditioning_job_free_v1(Conditioning);
 		Conditioning = nullptr;
 	}
-	vector < double > ().swap(T);
-	vector < float > ().swap(M);
 	vector < uint8_t > ().swap(Haploid);
 	Kbanned.clear();
 	Windows.clear();
@@ -180,10 +174,12 @@ void compute_job::make(unsigned int ind, double min_window_size, random_number_g
 	}
 }
 
-int compute_job::runHMM(genotype * genotype_graph, bitmatrix & haplotypes,
-	hmm_parameters & model, int & underflow_recovered_summing,
+int compute_job::runPhase(genotype * genotype_graph, bitmatrix & haplotypes,
+	hmm_parameters & model, unsigned int stage, double prune_threshold,
+	random_number_generator & sample_rng, int & underflow_recovered_summing,
 	int & underflow_recovered_precision) {
-	shapeit_hmm_job_v1 parameters = {};
+	assert(sample_rng.isFresh());
+	shapeit_hmm_phase_job_v1 parameters = {};
 	parameters.abi_version = SHAPEIT_HMM_ABI_VERSION;
 	parameters.struct_size = sizeof(parameters);
 	parameters.graph = genotype_graph->Graph;
@@ -201,15 +197,17 @@ int compute_job::runHMM(genotype * genotype_graph, bitmatrix & haplotypes,
 	parameters.total_haplotypes = model.Nhap;
 	parameters.emission_match = model.ee;
 	parameters.emission_mismatch = model.ed;
-	parameters.transition_probabilities = T.data();
-	parameters.transition_probabilities_length = T.size();
-	parameters.missing_probabilities = M.data();
-	parameters.missing_probabilities_length = M.size();
+	parameters.stage = stage;
+	parameters.prune_threshold = prune_threshold;
+	parameters.sample_seed = sample_rng.getSeed();
+	parameters.sample_domain = sample_rng.getDomain();
+	parameters.sample_iteration = sample_rng.getIteration();
+	parameters.sample_item = sample_rng.getItem();
 
 	shapeit_hmm_job_result_v1 result = {};
-	const uint32_t status = shapeit_hmm_run_job_v1(&parameters, &result);
+	const uint32_t status = shapeit_hmm_run_phase_job_v1(&parameters, &result);
 	if (status != SHAPEIT_HMM_STATUS_OK) {
-		throw runtime_error("Rust HMM job rejected its input layout (status " +
+		throw runtime_error("Rust common phase job rejected its input layout (status " +
 			to_string(status) + ")");
 	}
 	underflow_recovered_summing = result.underflow_recovered_summing;
