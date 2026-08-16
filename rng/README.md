@@ -67,6 +67,16 @@ recursive randomized splitter. It reconstructs the fresh logical Philox stream
 and preserves depth-first draw order, overlapping split boundaries, and all
 graph-coordinate conventions in one checked call.
 
+## Common conditioning jobs
+
+`shapeit_conditioning_job_build_v1` owns a worker's complete per-sample window
+and conditioning-state assembly. It collects and deduplicates the full PBWT
+neighbour set, applies Rust heterozygote-overlap IBD2 protection, and reproduces
+the logical fallback shuffle when a window has fewer than two states. The
+opaque Rust job retains the nested state vectors; C++ borrows immutable spans
+for the HMM and never copies or reallocates them. Each worker rebuilds the same
+opaque job in place so its scratch storage and vector capacities are reused.
+
 ## PBWT initialization sweep
 
 `shapeit_pbwt_solve_chunk_v1` owns one complete PBWT initialization chunk,

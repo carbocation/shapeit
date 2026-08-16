@@ -1,11 +1,11 @@
 use core::slice;
 
 const ABI_VERSION: u32 = 1;
-const STATUS_OK: u32 = 0;
-const STATUS_NULL_POINTER: u32 = 1;
-const STATUS_INVALID_DIMENSIONS: u32 = 2;
-const STATUS_OUT_OF_BOUNDS: u32 = 3;
-const STATUS_INTEGER_OVERFLOW: u32 = 4;
+pub(crate) const STATUS_OK: u32 = 0;
+pub(crate) const STATUS_NULL_POINTER: u32 = 1;
+pub(crate) const STATUS_INVALID_DIMENSIONS: u32 = 2;
+pub(crate) const STATUS_OUT_OF_BOUNDS: u32 = 3;
+pub(crate) const STATUS_INTEGER_OVERFLOW: u32 = 4;
 
 const MAX_AMBIGUOUS_PER_SEGMENT: usize = 22;
 const MASK_INIT: u64 = u64::MAX;
@@ -21,7 +21,7 @@ struct GraphSizes {
     missing: usize,
 }
 
-struct LogicalRng {
+pub(crate) struct LogicalRng {
     seed: u64,
     domain: u32,
     iteration: u32,
@@ -32,7 +32,7 @@ struct LogicalRng {
 }
 
 impl LogicalRng {
-    fn new(seed: u64, domain: u32, iteration: u32, item: u64) -> Self {
+    pub(crate) fn new(seed: u64, domain: u32, iteration: u32, item: u64) -> Self {
         Self {
             seed,
             domain,
@@ -69,7 +69,7 @@ impl LogicalRng {
     }
 
     #[inline]
-    fn next_bounded(&mut self, range: u32) -> u32 {
+    pub(crate) fn next_bounded(&mut self, range: u32) -> u32 {
         debug_assert!(range != 0);
         let mut value = self.next_u32();
         let mut product = u64::from(value) * u64::from(range);
@@ -95,16 +95,16 @@ struct SampleLayout {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GenotypeWindowV1 {
-    start_locus: i32,
-    start_segment: i32,
-    start_ambiguous: i32,
-    start_missing: i32,
-    start_transition: i32,
-    stop_locus: i32,
-    stop_segment: i32,
-    stop_ambiguous: i32,
-    stop_missing: i32,
-    stop_transition: i32,
+    pub(crate) start_locus: i32,
+    pub(crate) start_segment: i32,
+    pub(crate) start_ambiguous: i32,
+    pub(crate) start_missing: i32,
+    pub(crate) start_transition: i32,
+    pub(crate) stop_locus: i32,
+    pub(crate) stop_segment: i32,
+    pub(crate) stop_ambiguous: i32,
+    pub(crate) stop_missing: i32,
+    pub(crate) stop_transition: i32,
 }
 
 #[inline]
@@ -796,6 +796,46 @@ fn output_window(
     })
 }
 
+pub(crate) struct WindowInputs<'a> {
+    pub(crate) variants: &'a [u8],
+    pub(crate) variant_count: usize,
+    pub(crate) diplotypes: &'a [u64],
+    pub(crate) segment_lengths: &'a [u16],
+    pub(crate) segment_start_centimorgans: &'a [f64],
+    pub(crate) segment_stop_centimorgans: &'a [f64],
+    pub(crate) minimum_window_centimorgans: f32,
+}
+
+pub(crate) fn build_windows(
+    inputs: WindowInputs<'_>,
+    rng: &mut LogicalRng,
+) -> Result<Vec<GenotypeWindowV1>, u32> {
+    let segments = segment_coordinates(
+        inputs.variants,
+        inputs.variant_count,
+        inputs.diplotypes,
+        inputs.segment_lengths,
+        inputs.segment_start_centimorgans,
+        inputs.segment_stop_centimorgans,
+    )?;
+    if segments.len() > i32::MAX as usize {
+        return Err(STATUS_INTEGER_OVERFLOW);
+    }
+    let ranges = split_windows(
+        f64::from(inputs.minimum_window_centimorgans),
+        0,
+        segments.len() - 1,
+        &segments,
+        rng,
+    )
+    .unwrap_or_else(|| vec![(0, segments.len() - 1)]);
+    let mut output = Vec::with_capacity(ranges.len());
+    for (start, stop) in ranges {
+        output.push(output_window(start, stop, &segments)?);
+    }
+    Ok(output)
+}
+
 #[no_mangle]
 pub extern "C" fn shapeit_genotype_abi_version() -> u32 {
     ABI_VERSION
@@ -1224,38 +1264,24 @@ pub unsafe extern "C" fn shapeit_genotype_windows_v1(
     } else {
         slice::from_raw_parts(segment_stop_centimorgans, segment_stop_centimorgans_length)
     };
-    let segments = match segment_coordinates(
-        variants,
-        variant_count,
-        diplotypes,
-        segment_lengths,
-        segment_start_centimorgans,
-        segment_stop_centimorgans,
+    let mut rng = LogicalRng::new(seed, domain, iteration, item);
+    let output = match build_windows(
+        WindowInputs {
+            variants,
+            variant_count,
+            diplotypes,
+            segment_lengths,
+            segment_start_centimorgans,
+            segment_stop_centimorgans,
+            minimum_window_centimorgans,
+        },
+        &mut rng,
     ) {
         Ok(value) => value,
         Err(status) => return status,
     };
-    if segments.len() > i32::MAX as usize {
-        return STATUS_INTEGER_OVERFLOW;
-    }
-    let mut rng = LogicalRng::new(seed, domain, iteration, item);
-    let ranges = split_windows(
-        f64::from(minimum_window_centimorgans),
-        0,
-        segments.len() - 1,
-        &segments,
-        &mut rng,
-    )
-    .unwrap_or_else(|| vec![(0, segments.len() - 1)]);
-    if ranges.len() > windows_capacity {
+    if output.len() > windows_capacity {
         return STATUS_OUT_OF_BOUNDS;
-    }
-    let mut output = Vec::with_capacity(ranges.len());
-    for (start, stop) in ranges {
-        output.push(match output_window(start, stop, &segments) {
-            Ok(value) => value,
-            Err(status) => return status,
-        });
     }
     if !output.is_empty() {
         let windows = slice::from_raw_parts_mut(windows, windows_capacity);

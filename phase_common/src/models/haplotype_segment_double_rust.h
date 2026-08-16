@@ -23,15 +23,17 @@
 #ifndef _HAPLOTYPE_SEGMENT_DOUBLE_RUST_H
 #define _HAPLOTYPE_SEGMENT_DOUBLE_RUST_H
 
+#include <span>
+
 #include <objects/compute_job.h>
 #include <objects/hmm_parameters.h>
 
 int run_haplotype_segment_double_rust(
-	genotype *, bitmatrix &, std::vector < unsigned int > &, window &,
+	genotype *, bitmatrix &, std::span < const uint32_t >, window &,
 	hmm_parameters &, std::vector < double > &, std::vector < float > &);
 
 int run_haplotype_segment_single_rust(
-	genotype *, bitmatrix &, std::vector < unsigned int > &, window &,
+	genotype *, bitmatrix &, std::span < const uint32_t >, window &,
 	hmm_parameters &, std::vector < double > &, std::vector < float > &);
 
 #endif

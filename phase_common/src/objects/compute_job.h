@@ -23,12 +23,17 @@
 #ifndef _COMPUTE_THREAD_H
 #define _COMPUTE_THREAD_H
 
+#include <cstdint>
+#include <span>
+
 #include <utils/otools.h>
 
 #include <containers/conditioning_set/conditioning_set_header.h>
 #include <containers/genotype_set.h>
 #include <containers/variant_map.h>
 #include <containers/window_set.h>
+
+struct shapeit_conditioning_job_v1;
 
 class compute_job {
 public:
@@ -47,14 +52,12 @@ public:
 
 	//States
 	std::vector < track > Kbanned;
-	std::vector < std::vector < unsigned int > > Kstates;
-
-	//Random states
-	std::vector < unsigned int > Ordering;
-	std::vector < uint32_t > Seen;
-	uint32_t seen_epoch;
+	std::vector < std::span < const uint32_t > > Kstates;
+	shapeit_conditioning_job_v1 * Conditioning;
+	std::vector < uint8_t > Haploid;
 
 	compute_job(variant_map & , genotype_set & , conditioning_set & , unsigned int n_max_transitions , unsigned int n_max_missing);
+	compute_job(const compute_job &);
 	~compute_job();
 
 	void free();

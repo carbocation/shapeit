@@ -405,6 +405,25 @@ fn het_overlap(source: &[u8], layout: HetOverlapLayout) -> f32 {
     het_overlap_portable(source, layout)
 }
 
+pub(crate) fn heterozygote_overlap(
+    source: &[u8],
+    source_stride: usize,
+    individual0: usize,
+    individual1: usize,
+    start: usize,
+    stop: usize,
+) -> Result<f32, u32> {
+    let layout = validate_het_overlap_layout(
+        source.len(),
+        source_stride,
+        individual0,
+        individual1,
+        start,
+        stop,
+    )?;
+    Ok(het_overlap(source, layout))
+}
+
 #[no_mangle]
 pub extern "C" fn shapeit_bitmatrix_abi_version() -> u32 {
     ABI_VERSION
@@ -527,19 +546,12 @@ pub unsafe extern "C" fn shapeit_bitmatrix_het_overlap_v1(
     if source.is_null() || overlap.is_null() {
         return STATUS_NULL_POINTER;
     }
-    let layout = match validate_het_overlap_layout(
-        source_length,
-        source_stride,
-        individual0,
-        individual1,
-        start,
-        stop,
-    ) {
-        Ok(value) => value,
-        Err(status) => return status,
-    };
     let source = slice::from_raw_parts(source, source_length);
-    *overlap = het_overlap(source, layout);
+    *overlap =
+        match heterozygote_overlap(source, source_stride, individual0, individual1, start, stop) {
+            Ok(value) => value,
+            Err(status) => return status,
+        };
     STATUS_OK
 }
 

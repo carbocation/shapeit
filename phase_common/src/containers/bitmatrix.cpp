@@ -190,18 +190,6 @@ void bitmatrix::getMatchHets(unsigned int i0, unsigned int i1, unsigned int star
 }
 */
 
-float bitmatrix::getMatchHets(unsigned int i0, unsigned int i1, unsigned int start, unsigned int stop) {
-	float overlap = 0.0f;
-	const uint32_t status = shapeit_bitmatrix_het_overlap_v1(
-		bytes, n_bytes, n_cols >> 3, i0, i1, start, stop, &overlap);
-	if (status != SHAPEIT_BITMATRIX_STATUS_OK) {
-		throw runtime_error("Rust heterozygote overlap rejected the bitmatrix layout (status " +
-			to_string(status) + ")");
-	}
-	return overlap;
-}
-
-
 void bitmatrix::allocate(unsigned int nrow, unsigned int ncol) {
 	//n_rows = nrow + ((nrow%8)?(8-(nrow%8)):0);
 	//n_cols = ncol + ((ncol%8)?(8-(ncol%8)):0);

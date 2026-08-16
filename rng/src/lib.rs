@@ -1,4 +1,5 @@
 mod bitmatrix;
+mod conditioning;
 mod genotype;
 mod hmm;
 mod pbwt;

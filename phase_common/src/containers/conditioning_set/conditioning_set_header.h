@@ -34,7 +34,7 @@ public:
 	//VARIANT INDEXING
 	std::vector < int > sites_pbwt_mthreading;
 	std::vector < bool > sites_pbwt_evaluation;
-	std::vector < bool > sites_pbwt_selection;
+	std::vector < uint8_t > sites_pbwt_selection;
 	std::vector < int > sites_pbwt_grouping;
 	//std::vector < int > sites_pbwt_storage;
 	std::vector < int > starts_pbwt_mthreading;

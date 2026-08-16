@@ -25,8 +25,6 @@
 
 #include <utils/otools.h>
 
-#include <objects/genotype/genotype_header.h>
-
 #include <containers/variant_map.h>
 
 class window {
@@ -85,7 +83,6 @@ public:
 
 	//
 	int size();
-	int build (variant_map &, genotype *, float, random_number_generator &);
 };
 
 #endif

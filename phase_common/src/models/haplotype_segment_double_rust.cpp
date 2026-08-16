@@ -42,7 +42,7 @@ struct subset_transpose_view {
 };
 
 subset_transpose_view prepare_haplotype_subset(
-	const bitmatrix & source, const vector < unsigned int > & rows,
+	const bitmatrix & source, span < const uint32_t > rows,
 	unsigned int locus_first, unsigned int locus_last) {
 	static_assert(sizeof(unsigned int) == sizeof(uint32_t));
 	const uint32_t source_byte_first = locus_first >> 3;
@@ -71,7 +71,7 @@ subset_transpose_view prepare_haplotype_subset(
 }
 
 int run_haplotype_segment_double_rust(
-	genotype * G, bitmatrix & H, vector < unsigned int > & conditioning_haplotypes,
+	genotype * G, bitmatrix & H, span < const uint32_t > conditioning_haplotypes,
 	window & W, hmm_parameters & M, vector < double > & transition_probabilities,
 	vector < float > & missing_probabilities) {
 	static_assert(sizeof(unsigned long) == sizeof(uint64_t));
@@ -145,7 +145,7 @@ int run_haplotype_segment_double_rust(
 }
 
 int run_haplotype_segment_single_rust(
-	genotype * G, bitmatrix & H, vector < unsigned int > & conditioning_haplotypes,
+	genotype * G, bitmatrix & H, span < const uint32_t > conditioning_haplotypes,
 	window & W, hmm_parameters & M, vector < double > & transition_probabilities,
 	vector < float > & missing_probabilities) {
 	static_assert(sizeof(unsigned long) == sizeof(uint64_t));

@@ -21,19 +21,27 @@
  ******************************************************************************/
 
 #include <objects/compute_job.h>
+#include <shapeit_conditioning.h>
+
+#include <cassert>
+#include <cstdint>
+#include <stdexcept>
 
 using namespace std;
-
-#define MAX_OVERLAP_HETS 0.75f
-#define N_RANDOM_HAPS 100
 
 compute_job::compute_job(variant_map & _V, genotype_set & _G, conditioning_set & _H, unsigned int n_max_transitions, unsigned int n_max_missing) : V(_V), G(_G), H(_H) {
 	T = vector < double > (n_max_transitions, 0.0);
 	M = vector < float > (n_max_missing , 0.0);
-	Ordering = vector < unsigned int > (H.n_hap);
-	iota(Ordering.begin(), Ordering.end(), 0);
-	Seen = vector < uint32_t > (H.n_hap, 0);
-	seen_epoch = 0;
+	Conditioning = nullptr;
+	Haploid = vector < uint8_t > (G.n_ind, 0);
+	for (int ind = 0 ; ind < G.n_ind ; ind ++) Haploid[ind] = G.vecG[ind]->haploid;
+}
+
+compute_job::compute_job(const compute_job & other) : V(other.V), G(other.G), H(other.H) {
+	T = other.T;
+	M = other.M;
+	Conditioning = nullptr;
+	Haploid = other.Haploid;
 }
 
 compute_job::~compute_job() {
@@ -41,95 +49,129 @@ compute_job::~compute_job() {
 }
 
 void compute_job::free () {
+	Kstates.clear();
+	if (Conditioning != nullptr) {
+		shapeit_conditioning_job_free_v1(Conditioning);
+		Conditioning = nullptr;
+	}
 	vector < double > ().swap(T);
 	vector < float > ().swap(M);
-	vector < vector < unsigned int > > ().swap(Kstates);
-	vector < uint32_t > ().swap(Seen);
+	vector < uint8_t > ().swap(Haploid);
 	Kbanned.clear();
 	Windows.clear();
 }
 
 void compute_job::make(unsigned int ind, double min_window_size, random_number_generator & job_rng, random_number_generator & fallback_rng) {
-	//1. Mapping coordinates of each segment
-	int n_windows = Windows.build (V, G.vecG[ind], min_window_size, job_rng);
-
-	//2. Update conditional haps
-	unsigned long addr_offset = H.sites_pbwt_ngroups * H.n_ind * 2UL;
-	Kstates = vector < vector < unsigned int > > (n_windows, vector < unsigned int >());
-	unsigned long curr_hap0 = 2*ind+0, curr_hap1 = 2*ind+1;
-	for (int w = 0 ; w < n_windows ; w++) {
-		if (++seen_epoch == 0) {
-			fill(Seen.begin(), Seen.end(), 0);
-			seen_epoch = 1;
-		}
-		for (int l = Windows.W[w].start_locus ; l <= Windows.W[w].stop_locus ; l++) {
-			if (H.sites_pbwt_selection[l]) {
-				for (int s = 0 ; s < H.depth ; s ++) {
-					int cond_hap0 = H.indexes_pbwt_neighbour[s * addr_offset + curr_hap0 * H.sites_pbwt_ngroups + H.sites_pbwt_grouping[l]];
-					int cond_hap1 = H.indexes_pbwt_neighbour[s * addr_offset + curr_hap1 * H.sites_pbwt_ngroups + H.sites_pbwt_grouping[l]];
-					if (cond_hap0 >= 0 && Seen[cond_hap0] != seen_epoch) {
-						Seen[cond_hap0] = seen_epoch;
-						Kstates[w].push_back(cond_hap0);
-					}
-					if (cond_hap1 >= 0 && Seen[cond_hap1] != seen_epoch) {
-						Seen[cond_hap1] = seen_epoch;
-						Kstates[w].push_back(cond_hap1);
-					}
-				}
-			}
-		}
-		sort(Kstates[w].begin(), Kstates[w].end());
-	}
-
-	//3. Protect for IBD2
+	static_assert(sizeof(unsigned int) == sizeof(uint32_t));
+	static_assert(sizeof(unsigned long) == sizeof(uint64_t));
+	static_assert(sizeof(int) == sizeof(int32_t));
+	assert(job_rng.isFresh());
+	assert(fallback_rng.isFresh());
+	Kstates.clear();
 	Kbanned.clear();
-	for (int w = 0 ; w < n_windows; w++) {
-		vector < int > toBeRemoved;
+	Windows.clear();
 
-		//3.1. Identify potential IBD2 pairs
-		for (int k = 1; k < Kstates[w].size() ; k++) {
-			unsigned int ind0 = Kstates[w][k-1]/2;
-			unsigned int ind1 = Kstates[w][k]/2;
-			if (ind0 == ind1 && ind0 < G.n_ind && !G.vecG[ind0]->haploid) {
-				float het_overlap = H.H_opt_hap.getMatchHets(ind, ind0, Windows.W[w].start_locus, Windows.W[w].stop_locus);
-				if (het_overlap > 0.75) {
-					toBeRemoved.push_back(k-1);
-					toBeRemoved.push_back(k);
-					Kbanned.emplace_back(ind0, Windows.W[w].start_locus, Windows.W[w].stop_locus);
-					//cout << "IBD2 : " << G.vecG[ind]->name << " vs " << G.vecG[ind0]->name << " / P = " << stb.str(het_overlap*100.0, 2) << endl;
-				}
-			}
+	genotype * genotype_graph = G.vecG[ind];
+	vector < double > start_centimorgans(genotype_graph->n_segments);
+	vector < double > stop_centimorgans(genotype_graph->n_segments);
+	for (unsigned int segment = 0, locus = 0 ; segment < genotype_graph->n_segments ; segment ++) {
+		start_centimorgans[segment] = V.vec_pos[locus]->cm;
+		locus += genotype_graph->Lengths[segment];
+		stop_centimorgans[segment] = V.vec_pos[locus - 1]->cm;
+	}
+
+	shapeit_conditioning_build_v1 parameters = {};
+	parameters.abi_version = SHAPEIT_CONDITIONING_ABI_VERSION;
+	parameters.struct_size = sizeof(parameters);
+	parameters.variants = genotype_graph->Variants.data();
+	parameters.variants_length = genotype_graph->Variants.size();
+	parameters.variant_count = genotype_graph->n_variants;
+	parameters.diplotypes = reinterpret_cast<const uint64_t *>(genotype_graph->Diplotypes.data());
+	parameters.diplotypes_length = genotype_graph->Diplotypes.size();
+	parameters.segment_lengths = genotype_graph->Lengths.data();
+	parameters.segment_lengths_length = genotype_graph->Lengths.size();
+	parameters.segment_start_centimorgans = start_centimorgans.data();
+	parameters.segment_start_centimorgans_length = start_centimorgans.size();
+	parameters.segment_stop_centimorgans = stop_centimorgans.data();
+	parameters.segment_stop_centimorgans_length = stop_centimorgans.size();
+	parameters.minimum_window_centimorgans = min_window_size;
+	parameters.selected_sites = H.sites_pbwt_selection.data();
+	parameters.selected_sites_length = H.sites_pbwt_selection.size();
+	parameters.site_grouping = reinterpret_cast<const int32_t *>(H.sites_pbwt_grouping.data());
+	parameters.site_grouping_length = H.sites_pbwt_grouping.size();
+	parameters.pbwt_neighbors = reinterpret_cast<const int32_t *>(H.indexes_pbwt_neighbour.data());
+	parameters.pbwt_neighbors_length = H.indexes_pbwt_neighbour.size();
+	parameters.pbwt_depth = H.depth;
+	parameters.pbwt_group_count = H.sites_pbwt_ngroups;
+	parameters.target_individual = ind;
+	parameters.target_individual_count = H.n_ind;
+	parameters.haplotype_count = H.n_hap;
+	parameters.haploid_individuals = Haploid.data();
+	parameters.haploid_individuals_length = Haploid.size();
+	parameters.haplotypes = H.H_opt_hap.bytes;
+	parameters.haplotypes_length = H.H_opt_hap.n_bytes;
+	parameters.haplotype_stride = H.H_opt_hap.n_cols >> 3;
+	parameters.maximum_heterozygote_mismatch = 0.75f;
+	parameters.window_seed = job_rng.getSeed();
+	parameters.window_domain = job_rng.getDomain();
+	parameters.window_iteration = job_rng.getIteration();
+	parameters.window_item = job_rng.getItem();
+	parameters.fallback_seed = fallback_rng.getSeed();
+	parameters.fallback_domain = fallback_rng.getDomain();
+	parameters.fallback_iteration = fallback_rng.getIteration();
+	parameters.fallback_item = fallback_rng.getItem();
+
+	uint32_t status = shapeit_conditioning_job_build_v1(&parameters, &Conditioning);
+	if (status == SHAPEIT_CONDITIONING_STATUS_INSUFFICIENT_STATES) {
+		vrb.error("Fewer than two conditioning haplotypes are available for [" +
+			genotype_graph->name + "]");
+	}
+	if (status != SHAPEIT_CONDITIONING_STATUS_OK) {
+		throw runtime_error("Rust conditioning job rejected its input layout (status " +
+			to_string(status) + ")");
+	}
+
+	const size_t n_windows = shapeit_conditioning_job_window_count_v1(Conditioning);
+	Windows.W = vector < window > (n_windows);
+	Kstates.resize(n_windows);
+	for (size_t w = 0 ; w < n_windows ; w ++) {
+		shapeit_genotype_window_v1 source_window = {};
+		const uint32_t * states = nullptr;
+		size_t states_length = 0;
+		uint8_t used_fallback = 0;
+		status = shapeit_conditioning_job_window_v1(
+			Conditioning, w, &source_window, &states, &states_length, &used_fallback);
+		if (status != SHAPEIT_CONDITIONING_STATUS_OK) {
+			throw runtime_error("Rust conditioning window accessor failed (status " +
+				to_string(status) + ")");
 		}
-
-		//3.2. Remove potential IBD2 states from conditioning set
-		if (toBeRemoved.size() > 0) {
-			vector < unsigned int > Ktmp;
-			Ktmp.reserve(Kstates[w].size() - toBeRemoved.size());
-			for (int k = 0, p = 0; k < Kstates[w].size() ; k++) {
-				if (p < toBeRemoved.size() && toBeRemoved[p] == k) p++;
-				else Ktmp.push_back(Kstates[w][k]);
-			}
-
-			Kstates[w] = std::move(Ktmp);
+		window & target = Windows.W[w];
+		target.start_locus = source_window.start_locus;
+		target.start_segment = source_window.start_segment;
+		target.start_ambiguous = source_window.start_ambiguous;
+		target.start_missing = source_window.start_missing;
+		target.start_transition = source_window.start_transition;
+		target.stop_locus = source_window.stop_locus;
+		target.stop_segment = source_window.stop_segment;
+		target.stop_ambiguous = source_window.stop_ambiguous;
+		target.stop_missing = source_window.stop_missing;
+		target.stop_transition = source_window.stop_transition;
+		Kstates[w] = span < const uint32_t > (states, states_length);
+		if (used_fallback) {
+			vrb.warning("No PBWT states found [" + genotype_graph->name + " / w=" +
+				stb.str(w) + "] / Using " + stb.str(states_length) + " random states");
 		}
 	}
 
-	//4. Protect for #states = 0
-	for (int w = 0 ; w < n_windows; w++) {
-		if (Kstates[w].size() < 2) {
-			iota(Ordering.begin(), Ordering.end(), 0);
-			fallback_rng.shuffle(Ordering.begin(), Ordering.end());
-			int n_added = 0;
-			for (unsigned int random_state : Ordering) {
-				if (random_state/2 != ind) {
-					Kstates[w].push_back(random_state);
-					if (++n_added == N_RANDOM_HAPS) break;
-				}
-			}
-			sort(Kstates[w].begin(), Kstates[w].end());
-			Kstates[w].erase(unique(Kstates[w].begin(), Kstates[w].end()), Kstates[w].end());
-			if (Kstates[w].size() < 2) vrb.error("Fewer than two conditioning haplotypes are available for [" + G.vecG[ind]->name + " / w=" + stb.str(w) + "]");
-			vrb.warning("No PBWT states found [" + G.vecG[ind]->name  + " / w=" + stb.str(w) + "] / Using " + stb.str(Kstates[w].size()) + " random states");
-		}
+	const shapeit_conditioning_track_v1 * tracks = nullptr;
+	size_t tracks_length = 0;
+	status = shapeit_conditioning_job_tracks_v1(Conditioning, &tracks, &tracks_length);
+	if (status != SHAPEIT_CONDITIONING_STATUS_OK) {
+		throw runtime_error("Rust conditioning track accessor failed (status " +
+			to_string(status) + ")");
+	}
+	Kbanned.reserve(tracks_length);
+	for (size_t t = 0 ; t < tracks_length ; t ++) {
+		Kbanned.emplace_back(tracks[t].individual, tracks[t].from, tracks[t].to);
 	}
 }

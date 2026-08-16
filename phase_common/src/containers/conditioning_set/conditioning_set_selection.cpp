@@ -154,11 +154,11 @@ void conditioning_set::select(uint32_t iteration) {
 	//Select new sites at which to trigger storage
 	vector < vector < int > > candidates = vector < vector < int > > (sites_pbwt_grouping.back() + 1);
 	for (int l = 0 ; l < n_site ; l++) if (sites_pbwt_evaluation[l]) candidates[sites_pbwt_grouping[l]].push_back(l);
-	sites_pbwt_selection = vector < bool > (n_site , false);
+	sites_pbwt_selection = vector < uint8_t > (n_site , 0);
 	for (int g = 0 ; g < candidates.size() ; g++) {
 		if (candidates[g].size() > 0) {
 			random_number_generator site_rng = rng.fork(RNG_DOMAIN_PHASE_COMMON_PBWT_SITE, iteration, g);
-			sites_pbwt_selection[candidates[g][site_rng.getInt(candidates[g].size())]] = true;
+			sites_pbwt_selection[candidates[g][site_rng.getInt(candidates[g].size())]] = 1;
 		}
 	}
 
