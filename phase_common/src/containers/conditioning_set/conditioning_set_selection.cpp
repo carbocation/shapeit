@@ -21,6 +21,10 @@
  ******************************************************************************/
 
 #include <containers/conditioning_set/conditioning_set_header.h>
+#include <shapeit_pbwt.h>
+
+#include <cstdint>
+#include <stdexcept>
 
 using namespace std;
 
@@ -48,102 +52,38 @@ void * selecter_callback(void * ptr) {
 }
 
 void conditioning_set::transposePBWTneighbours() {
-	int block = 32;
-	unsigned long addr_tar, addr_src;
-	unsigned long addr_offset = sites_pbwt_ngroups * n_ind * 2UL;
-	for (int d = 0; d < depth ; d ++) {
-		for (int s = 0; s < sites_pbwt_ngroups ; s += block) {
-			for(int h = 0; h < n_ind * 2; ++h) {
-				for(int b = 0; b < block && s + b < sites_pbwt_ngroups ; ++b) {
-					addr_tar = depth * addr_offset + h*sites_pbwt_ngroups + s + b;
-					addr_src = d * addr_offset + (s + b)*n_ind*2UL + h;
-					indexes_pbwt_neighbour[addr_tar] = indexes_pbwt_neighbour[addr_src];
-				}
-			}
-		}
-		std::copy(indexes_pbwt_neighbour.begin() + depth * addr_offset , indexes_pbwt_neighbour.end(), indexes_pbwt_neighbour.begin() + d * addr_offset );
+	static_assert(sizeof(int) == sizeof(int32_t));
+	const uint32_t status = shapeit_pbwt_transpose_neighbors_v1(
+		reinterpret_cast<int32_t *>(indexes_pbwt_neighbour.data()),
+		indexes_pbwt_neighbour.size(), 2UL * n_ind, sites_pbwt_ngroups, depth);
+	if (status != SHAPEIT_PBWT_STATUS_OK) {
+		throw runtime_error("Rust PBWT neighbour transpose rejected its layout (status " +
+			to_string(status) + ")");
 	}
 }
 
 
 void conditioning_set::select(int chunk) {
-	vector < int > A = vector < int > (n_hap, 0);
-	vector < int > B = vector < int > (n_hap, 0);
-	vector < int > C = vector < int > (n_hap, 0);
-	vector < int > D = vector < int > (n_hap, 0);
-	iota(A.begin(), A.end(), 0);
-	fill(C.begin(), C.end(), 0);
-
-	for (int l = 0 ; l < n_site ; l ++) {
-		bool eval = sites_pbwt_evaluation[l];
-		bool selc = sites_pbwt_selection[l];
-		bool chnk = (sites_pbwt_mthreading[l] == chunk);
-		bool buff = (sites_pbwt_mthreading[l] < chunk) && (l >= starts_pbwt_mthreading[chunk]);
-
-		if (eval && (chnk || buff)) {
-			int u = 0, v = 0, p = l, q = l;
-			for (int h = 0 ; h < n_hap ; h ++) {
-				int alookup = A[h], dlookup = C[h];
-				if (dlookup > p) p = dlookup;
-				if (dlookup > q) q = dlookup;
-				if (!H_opt_var.get(l, alookup)) {
-					A[u] = alookup;
-					C[u] = p;
-					p = 0;
-					u++;
-				} else {
-					B[v] = alookup;
-					D[v] = q;
-					q = 0;
-					v++;
-				}
-			}
-			std::copy(B.begin(), B.begin()+v, A.begin()+u);
-			std::copy(D.begin(), D.begin()+v, C.begin()+u);
-			if (selc && chnk) store(l, A, C);
-		}
+	static_assert(sizeof(int) == sizeof(int32_t));
+	const uint32_t status = shapeit_pbwt_select_chunk_v1(
+		H_opt_var.bytes, H_opt_var.n_bytes, H_opt_var.n_cols >> 3,
+		n_site, n_hap, n_ind, sites_pbwt_evaluation.data(),
+		sites_pbwt_evaluation.size(), sites_pbwt_selection.data(),
+		sites_pbwt_selection.size(),
+		reinterpret_cast<const int32_t *>(sites_pbwt_grouping.data()),
+		sites_pbwt_grouping.size(), sites_pbwt_ngroups,
+		reinterpret_cast<const int32_t *>(sites_pbwt_mthreading.data()),
+		sites_pbwt_mthreading.size(), chunk, starts_pbwt_mthreading[chunk], depth,
+		ibd_offsets.data(), ibd_offsets.size(), ibd_individuals.data(),
+		ibd_from.data(), ibd_to.data(), ibd_individuals.size(),
+		reinterpret_cast<int32_t *>(indexes_pbwt_neighbour.data()),
+		indexes_pbwt_neighbour.size());
+	if (status == SHAPEIT_PBWT_STATUS_INSUFFICIENT_STATES) {
+		vrb.error("Insufficient non-IBD2 PBWT neighbours for the requested depth");
 	}
-}
-
-void conditioning_set::store(int l, vector < int > & A, vector < int > & C) {
-	unsigned long addr_offset = sites_pbwt_ngroups * n_ind * 2UL;
-	for (int h = 0 ; h < n_hap ; h ++) {
-		int chap = A[h];
-		int cind = chap / 2;
-		if (cind < n_ind) {
-			int add_guess0 = 0, add_guess1 = 0, offset0 = 1, offset1 = 1, hap_guess0 = -1, hap_guess1 = -1, div_guess0 = -1, div_guess1 = -1;
-			unsigned long tar_idx = sites_pbwt_grouping[l] * 2UL * n_ind + chap;
-			for (int n_added = 0 ; n_added < depth ; ) {
-				if ((h-offset0)>=0) {
-					hap_guess0 = A[h-offset0];
-					div_guess0 = max(C[h-offset0+1], div_guess0);
-					add_guess0 = Kbanned.noIBD2(chap, hap_guess0, l);
-				} else { add_guess0 = 0; div_guess0 = l+1; }
-				if ((h+offset1)<n_hap) {
-					hap_guess1 = A[h+offset1];
-					div_guess1 = max(C[h+offset1], div_guess1);
-					add_guess1 = Kbanned.noIBD2(chap, hap_guess1, l);
-				} else { add_guess1 = 0; div_guess1 = l+1; }
-				if (add_guess0 && add_guess1) {
-					if (div_guess0 < div_guess1) {
-						indexes_pbwt_neighbour[n_added*addr_offset+tar_idx] = hap_guess0;
-						offset0++; n_added++;
-					} else {
-						indexes_pbwt_neighbour[n_added*addr_offset+tar_idx] = hap_guess1;
-						offset1++; n_added++;
-					}
-				} else if (add_guess0) {
-					indexes_pbwt_neighbour[n_added*addr_offset+tar_idx] = hap_guess0;
-					offset0++; n_added++;
-				} else if (add_guess1) {
-					indexes_pbwt_neighbour[n_added*addr_offset+tar_idx] = hap_guess1;
-					offset1++; n_added++;
-				} else {
-					offset0++;
-					offset1++;
-				}
-			}
-		}
+	if (status != SHAPEIT_PBWT_STATUS_OK) {
+		throw runtime_error("Rust PBWT selection rejected its layout (status " +
+			to_string(status) + ")");
 	}
 }
 
@@ -164,6 +104,18 @@ void conditioning_set::select(uint32_t iteration) {
 
 	//Clean up previous selected states
 	fill(indexes_pbwt_neighbour.begin(), indexes_pbwt_neighbour.end() , -1);
+	ibd_offsets.assign(n_ind + 1, 0);
+	ibd_individuals.clear();
+	ibd_from.clear();
+	ibd_to.clear();
+	for (int source = 0 ; source < n_ind ; source ++) {
+		for (const track & value : Kbanned.IBD2[source]) {
+			ibd_individuals.push_back(value.ind);
+			ibd_from.push_back(value.from);
+			ibd_to.push_back(value.to);
+		}
+		ibd_offsets[source + 1] = ibd_individuals.size();
+	}
 
 	//Perform multi-threaded selection
 	vrb.progress("  * PBWT selection", 0.0f);
@@ -177,6 +129,10 @@ void conditioning_set::select(uint32_t iteration) {
 
 	//Transpose matrix with selected states
 	transposePBWTneighbours();
+	ibd_offsets.clear();
+	ibd_individuals.clear();
+	ibd_from.clear();
+	ibd_to.clear();
 
 	vrb.bullet("PBWT selection (" + stb.str(tac.rel_time()*1.0/1000, 2) + "s)");
 }

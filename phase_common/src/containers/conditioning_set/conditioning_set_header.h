@@ -33,7 +33,7 @@ public:
 
 	//VARIANT INDEXING
 	std::vector < int > sites_pbwt_mthreading;
-	std::vector < bool > sites_pbwt_evaluation;
+	std::vector < uint8_t > sites_pbwt_evaluation;
 	std::vector < uint8_t > sites_pbwt_selection;
 	std::vector < int > sites_pbwt_grouping;
 	//std::vector < int > sites_pbwt_storage;
@@ -48,6 +48,10 @@ public:
 
 	//STATE DATA
 	std::vector < int > indexes_pbwt_neighbour;
+	std::vector < size_t > ibd_offsets;
+	std::vector < int32_t > ibd_individuals;
+	std::vector < int32_t > ibd_from;
+	std::vector < int32_t > ibd_to;
 
 	//SOLVER DATA
 	std::vector < float > scoreBit;
@@ -67,7 +71,6 @@ public:
 	bool split(variant_map & V, float min_length, int left_index, int right_index, std::vector < int > & output);
 
 	//STATES PROCESSING
-	void store(int l, std::vector < int > & A, std::vector < int > & C);
 	void select(int chunk);
 	void select(uint32_t);
 	void transposePBWTneighbours();

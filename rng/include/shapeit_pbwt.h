@@ -11,6 +11,7 @@
 #define SHAPEIT_PBWT_STATUS_INVALID_DIMENSIONS 2U
 #define SHAPEIT_PBWT_STATUS_OUT_OF_BOUNDS 3U
 #define SHAPEIT_PBWT_STATUS_INTEGER_OVERFLOW 4U
+#define SHAPEIT_PBWT_STATUS_INSUFFICIENT_STATES 5U
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,6 +36,41 @@ uint32_t shapeit_pbwt_solve_chunk_v1(
     size_t buffer_length,
     const float * scores,
     size_t scores_length);
+
+uint32_t shapeit_pbwt_select_chunk_v1(
+    const uint8_t * haplotypes,
+    size_t haplotypes_length,
+    size_t haplotype_stride,
+    size_t site_count,
+    size_t haplotype_count,
+    size_t target_individual_count,
+    const uint8_t * evaluated_sites,
+    size_t evaluated_sites_length,
+    const uint8_t * selected_sites,
+    size_t selected_sites_length,
+    const int32_t * site_groups,
+    size_t site_groups_length,
+    size_t group_count,
+    const int32_t * site_chunks,
+    size_t site_chunks_length,
+    size_t chunk,
+    size_t buffer_start,
+    size_t depth,
+    const size_t * ibd_offsets,
+    size_t ibd_offsets_length,
+    const int32_t * ibd_individuals,
+    const int32_t * ibd_from,
+    const int32_t * ibd_to,
+    size_t ibd_track_count,
+    int32_t * neighbors,
+    size_t neighbors_length);
+
+uint32_t shapeit_pbwt_transpose_neighbors_v1(
+    int32_t * neighbors,
+    size_t neighbors_length,
+    size_t target_haplotype_count,
+    size_t group_count,
+    size_t depth);
 
 #ifdef __cplusplus
 }

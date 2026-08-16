@@ -43,6 +43,10 @@ conditioning_set::~conditioning_set() {
 	sites_pbwt_selection.clear();
 	sites_pbwt_grouping.clear();
 	indexes_pbwt_neighbour.clear();
+	ibd_offsets.clear();
+	ibd_individuals.clear();
+	ibd_from.clear();
+	ibd_to.clear();
 }
 
 
@@ -83,11 +87,11 @@ void conditioning_set::initialize(variant_map & V, float _modulo_selection, floa
 
 	//MAPPING EVAL+GRP
 	int n_evaluated = 0;
-	sites_pbwt_evaluation = vector < bool > (V.size(), false);
+	sites_pbwt_evaluation = vector < uint8_t > (V.size(), 0);
 	sites_pbwt_mthreading = vector < int > (V.size(), -1);
 	sites_pbwt_grouping = vector < int > (V.size(), -1);
 	for (int l = 0 ; l < V.size() ; l ++) {
-		sites_pbwt_evaluation[l] = (V.vec_pos[l]->getMAC() >= _mac && V.vec_pos[l]->getMDR() <= _mdr);
+		sites_pbwt_evaluation[l] = (V.vec_pos[l]->getMAC() >= _mac && V.vec_pos[l]->getMDR() <= _mdr) ? 1 : 0;
 		sites_pbwt_grouping[l] = (int)round(V.vec_pos[l]->cm / _modulo_selection);
 		n_evaluated += sites_pbwt_evaluation[l];
 	}

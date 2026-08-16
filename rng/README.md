@@ -90,6 +90,12 @@ ordering/divergence updates. C++ retains only chunk scheduling and progress
 reporting. Parallel chunks consume immutable prefix snapshots and write disjoint
 locus rows, so logical results do not depend on worker assignment.
 
+`shapeit_pbwt_select_chunk_v1` likewise owns the iterative common-phasing PBWT
+ordering/divergence scan and IBD2-aware neighbour search. C++ flattens its
+collapsed IBD2 tracks once per sweep and schedules disjoint chunks; Rust then
+transposes the completed neighbour slabs directly into the haplotype-major
+layout borrowed by the conditioning jobs.
+
 ## Random-number generation
 
 ABI version 1 uses Philox4x32-10. A random block is a pure function of:
