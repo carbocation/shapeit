@@ -38,6 +38,26 @@ uint32_t shapeit_genotype_graph_build_v1(
     size_t diplotypes_length,
     uint32_t * transition_count);
 
+uint32_t shapeit_genotype_sample_v1(
+    uint8_t * variants,
+    size_t variants_length,
+    size_t variant_count,
+    const uint8_t * ambiguous,
+    size_t ambiguous_length,
+    const uint64_t * diplotypes,
+    size_t diplotypes_length,
+    const uint16_t * segment_lengths,
+    size_t segment_lengths_length,
+    const double * transition_probabilities,
+    size_t transition_probabilities_length,
+    const float * missing_probabilities,
+    size_t missing_probabilities_length,
+    uint8_t haploid,
+    uint64_t seed,
+    uint32_t domain,
+    uint32_t iteration,
+    uint64_t item);
+
 #ifdef __cplusplus
 }
 #endif

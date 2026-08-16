@@ -43,13 +43,19 @@ features. The single-precision implementation preserves the existing AVX2/FMA
 arithmetic and reduction order. The C++ adapters make one Rust call per HMM
 window rather than crossing the ABI within a locus loop.
 
-## Genotype graph construction
+## Genotype graph construction and sampling
 
 `shapeit_genotype_graph_sizes_v1` and `shapeit_genotype_graph_build_v1` own the
 per-sample common-phasing graph builder. They preserve segment splitting,
 scaffold ordering, 8-lane ambiguity codes, diplotype masks, missing counts, and
 transition counts while reducing repeated scans of the packed variants. Output
 storage remains caller-owned.
+
+`shapeit_genotype_sample_v1` samples a complete graph in one call, including
+forward/backward transition sampling, missing-genotype imputation, and applying
+ambiguity codes to the packed haplotypes. It reconstructs the caller's fresh
+logical Philox stream from its stable coordinates and preserves the established
+draw sequence exactly; scheduling and thread identity never enter the ABI.
 
 ## PBWT initialization sweep
 

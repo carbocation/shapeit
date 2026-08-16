@@ -21,6 +21,60 @@ struct GraphSizes {
     missing: usize,
 }
 
+struct LogicalRng {
+    seed: u64,
+    domain: u32,
+    iteration: u32,
+    item: u64,
+    next_block: u64,
+    words: [u32; 4],
+    next_word: usize,
+}
+
+impl LogicalRng {
+    fn new(seed: u64, domain: u32, iteration: u32, item: u64) -> Self {
+        Self {
+            seed,
+            domain,
+            iteration,
+            item,
+            next_block: 0,
+            words: [0; 4],
+            next_word: 4,
+        }
+    }
+
+    #[inline]
+    fn next_u32(&mut self) -> u32 {
+        if self.next_word == self.words.len() {
+            self.words = super::application_block(
+                self.seed,
+                self.domain,
+                self.iteration,
+                self.item,
+                self.next_block,
+            );
+            self.next_block = self.next_block.wrapping_add(1);
+            self.next_word = 0;
+        }
+        let value = self.words[self.next_word];
+        self.next_word += 1;
+        value
+    }
+
+    #[inline]
+    fn next_f64(&mut self) -> f64 {
+        let bits = (u64::from(self.next_u32()) << 32) | u64::from(self.next_u32());
+        ((bits >> 11) as f64) * (1.0 / 9_007_199_254_740_992.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SampleLayout {
+    transitions: usize,
+    missing: usize,
+}
+
 #[inline]
 fn variant_nibble(variants: &[u8], locus: usize) -> u8 {
     (variants[locus >> 1] >> ((locus & 1) << 2)) & 0x0f
@@ -183,6 +237,233 @@ fn build_graph(
     transitions
 }
 
+fn validate_sample_layout(
+    variants: &[u8],
+    variant_count: usize,
+    ambiguous_length: usize,
+    diplotypes: &[u64],
+    segment_lengths: &[u16],
+    transition_probabilities_length: usize,
+    missing_probabilities_length: usize,
+) -> Result<SampleLayout, u32> {
+    if diplotypes.is_empty() || diplotypes.len() != segment_lengths.len() {
+        return Err(STATUS_INVALID_DIMENSIONS);
+    }
+    let mut loci = 0usize;
+    let mut ambiguous = 0usize;
+    let mut missing = 0usize;
+    for &length in segment_lengths {
+        loci = loci
+            .checked_add(usize::from(length))
+            .ok_or(STATUS_INTEGER_OVERFLOW)?;
+    }
+    if loci != variant_count {
+        return Err(STATUS_INVALID_DIMENSIONS);
+    }
+    for locus in 0..variant_count {
+        match graph_code(variant_nibble(variants, locus)) {
+            1 => missing += 1,
+            2 | 3 => ambiguous += 1,
+            _ => {}
+        }
+    }
+    if ambiguous != ambiguous_length {
+        return Err(STATUS_INVALID_DIMENSIONS);
+    }
+    let required_missing = missing.checked_mul(8).ok_or(STATUS_INTEGER_OVERFLOW)?;
+    if required_missing > missing_probabilities_length {
+        return Err(STATUS_OUT_OF_BOUNDS);
+    }
+    let mut previous = 1usize;
+    let mut transitions = 0usize;
+    for &diplotype in diplotypes {
+        let current = diplotype.count_ones() as usize;
+        if current == 0 {
+            return Err(STATUS_INVALID_DIMENSIONS);
+        }
+        transitions = transitions
+            .checked_add(
+                previous
+                    .checked_mul(current)
+                    .ok_or(STATUS_INTEGER_OVERFLOW)?,
+            )
+            .ok_or(STATUS_INTEGER_OVERFLOW)?;
+        previous = current;
+    }
+    if transitions > transition_probabilities_length {
+        return Err(STATUS_OUT_OF_BOUNDS);
+    }
+    Ok(SampleLayout {
+        transitions,
+        missing,
+    })
+}
+
+#[inline]
+fn sample_probabilities(probabilities: &[f64], total: f64, rng: &mut LogicalRng) -> usize {
+    let mut cumulative = probabilities[0];
+    let draw = rng.next_f64() * total;
+    for index in 0..probabilities.len() - 1 {
+        if draw < cumulative {
+            return index;
+        }
+        cumulative += probabilities[index + 1];
+    }
+    probabilities.len() - 1
+}
+
+#[inline]
+fn diplotype_code(mask: u64, index: usize) -> u8 {
+    let mut active = mask;
+    for _ in 0..index {
+        active &= active - 1;
+    }
+    active.trailing_zeros() as u8
+}
+
+fn sample_forward(
+    diplotypes: &[u64],
+    transition_probabilities: &[f64],
+    sampled: &mut [u8],
+    rng: &mut LogicalRng,
+) {
+    let mut probabilities = [0.0f64; 64];
+    let mut previous_sampled = 0usize;
+    let mut previous_count = 1usize;
+    let mut transition_offset = 0usize;
+    for (segment, &diplotype) in diplotypes.iter().enumerate() {
+        let current_count = diplotype.count_ones() as usize;
+        let start = transition_offset + previous_sampled * current_count;
+        let mut total = 0.0f64;
+        for relative in 0..current_count {
+            probabilities[relative] = transition_probabilities[start + relative];
+            total += probabilities[relative];
+        }
+        previous_sampled = sample_probabilities(&probabilities, total, rng);
+        sampled[segment] = diplotype_code(diplotype, previous_sampled);
+        transition_offset += previous_count * current_count;
+        previous_count = current_count;
+    }
+}
+
+fn sample_backward(
+    diplotypes: &[u64],
+    transition_probabilities: &[f64],
+    transitions: usize,
+    sampled: &mut [u8],
+    rng: &mut LogicalRng,
+) {
+    let mut probabilities = [0.0f64; 64 * 64];
+    let mut next_sampled = None;
+    let mut next_count = diplotypes.last().unwrap().count_ones() as usize;
+    let mut transition_offset = transitions;
+    for segment in (0..diplotypes.len().saturating_sub(1)).rev() {
+        let current_count = diplotypes[segment].count_ones() as usize;
+        transition_offset -= next_count * current_count;
+        if let Some(next_sampled_index) = next_sampled {
+            let mut total = 0.0f64;
+            for relative in 0..current_count {
+                probabilities[relative] = transition_probabilities
+                    [transition_offset + next_sampled_index + relative * next_count];
+                total += probabilities[relative];
+            }
+            let current_sampled = sample_probabilities(&probabilities[..64], total, rng);
+            sampled[segment] = diplotype_code(diplotypes[segment], current_sampled);
+            next_sampled = Some(current_sampled);
+        } else {
+            let block_length = next_count * current_count;
+            let mut total = 0.0f64;
+            for relative in 0..block_length {
+                probabilities[relative] = transition_probabilities[transition_offset + relative];
+                total += probabilities[relative];
+            }
+            let joint_sampled = sample_probabilities(&probabilities, total, rng);
+            sampled[segment + 1] =
+                diplotype_code(diplotypes[segment + 1], joint_sampled % next_count);
+            let current_sampled = joint_sampled / next_count;
+            sampled[segment] = diplotype_code(diplotypes[segment], current_sampled);
+            next_sampled = Some(current_sampled);
+        }
+        next_count = current_count;
+    }
+}
+
+#[inline]
+fn set_haplotype(variants: &mut [u8], locus: usize, haplotype: usize, allele: bool) {
+    let byte = &mut variants[locus >> 1];
+    let shift = ((locus & 1) << 2) + 2 + haplotype;
+    let mask = 1u8 << shift;
+    *byte = (*byte & !mask) | (u8::from(allele) << shift);
+}
+
+struct ApplySample<'a> {
+    variants: &'a mut [u8],
+    ambiguous: &'a [u8],
+    segment_lengths: &'a [u16],
+    sampled: &'a [u8],
+    missing_probabilities: &'a [f32],
+    haploid: bool,
+}
+
+fn apply_sample(parameters: ApplySample<'_>, rng: &mut LogicalRng) {
+    let ApplySample {
+        variants,
+        ambiguous,
+        segment_lengths,
+        sampled,
+        missing_probabilities,
+        haploid,
+    } = parameters;
+    let mut absolute_locus = 0usize;
+    let mut ambiguous_index = 0usize;
+    let mut missing_index = 0usize;
+    for (segment, &length) in segment_lengths.iter().enumerate() {
+        let haplotype0 = usize::from(sampled[segment] >> 3);
+        let haplotype1 = usize::from(sampled[segment] & 7);
+        for _ in 0..length {
+            let code = graph_code(variant_nibble(variants, absolute_locus));
+            if code == 1 {
+                let start = missing_index * 8;
+                if haploid {
+                    let probability0 = missing_probabilities[start + haplotype0];
+                    let probability1 = missing_probabilities[start + haplotype1];
+                    let probability00 = (1.0 - probability0) * (1.0 - probability1);
+                    let probability11 = probability0 * probability1;
+                    let allele = rng.next_f64()
+                        <= f64::from(probability11 / (probability00 + probability11));
+                    set_haplotype(variants, absolute_locus, 0, allele);
+                    set_haplotype(variants, absolute_locus, 1, allele);
+                } else {
+                    let allele0 =
+                        rng.next_f64() <= f64::from(missing_probabilities[start + haplotype0]);
+                    let allele1 =
+                        rng.next_f64() <= f64::from(missing_probabilities[start + haplotype1]);
+                    set_haplotype(variants, absolute_locus, 0, allele0);
+                    set_haplotype(variants, absolute_locus, 1, allele1);
+                }
+                missing_index += 1;
+            }
+            if code > 1 {
+                let graph = ambiguous[ambiguous_index];
+                set_haplotype(
+                    variants,
+                    absolute_locus,
+                    0,
+                    ((graph >> haplotype0) & 1) != 0,
+                );
+                set_haplotype(
+                    variants,
+                    absolute_locus,
+                    1,
+                    ((graph >> haplotype1) & 1) != 0,
+                );
+                ambiguous_index += 1;
+            }
+            absolute_locus += 1;
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn shapeit_genotype_abi_version() -> u32 {
     ABI_VERSION
@@ -295,6 +576,118 @@ pub unsafe extern "C" fn shapeit_genotype_graph_build_v1(
     STATUS_OK
 }
 
+#[no_mangle]
+/// Sample one complete genotype graph and update its packed haplotype alleles.
+///
+/// RNG coordinates identify a fresh logical Philox stream. The function
+/// consumes that stream in the same order as the established forward/backward
+/// sampler and missing-genotype imputation.
+///
+/// # Safety
+///
+/// Every buffer must be valid for its stated length. The mutable packed-variant
+/// buffer must not overlap any immutable input. Invalid layouts are rejected
+/// before any allele is modified.
+pub unsafe extern "C" fn shapeit_genotype_sample_v1(
+    variants: *mut u8,
+    variants_length: usize,
+    variant_count: usize,
+    ambiguous: *const u8,
+    ambiguous_length: usize,
+    diplotypes: *const u64,
+    diplotypes_length: usize,
+    segment_lengths: *const u16,
+    segment_lengths_length: usize,
+    transition_probabilities: *const f64,
+    transition_probabilities_length: usize,
+    missing_probabilities: *const f32,
+    missing_probabilities_length: usize,
+    haploid: u8,
+    seed: u64,
+    domain: u32,
+    iteration: u32,
+    item: u64,
+) -> u32 {
+    if variants.is_null()
+        || diplotypes.is_null()
+        || segment_lengths.is_null()
+        || transition_probabilities.is_null()
+        || (ambiguous_length != 0 && ambiguous.is_null())
+        || (missing_probabilities_length != 0 && missing_probabilities.is_null())
+    {
+        return STATUS_NULL_POINTER;
+    }
+    if haploid > 1 {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    let required_variants = match required_variant_bytes(variant_count) {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
+    if required_variants > variants_length {
+        return STATUS_OUT_OF_BOUNDS;
+    }
+    let variants = slice::from_raw_parts_mut(variants, variants_length);
+    let ambiguous = if ambiguous_length == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(ambiguous, ambiguous_length)
+    };
+    let diplotypes = slice::from_raw_parts(diplotypes, diplotypes_length);
+    let segment_lengths = slice::from_raw_parts(segment_lengths, segment_lengths_length);
+    let transition_probabilities =
+        slice::from_raw_parts(transition_probabilities, transition_probabilities_length);
+    let missing_probabilities = if missing_probabilities_length == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(missing_probabilities, missing_probabilities_length)
+    };
+    let layout = match validate_sample_layout(
+        variants,
+        variant_count,
+        ambiguous.len(),
+        diplotypes,
+        segment_lengths,
+        transition_probabilities.len(),
+        missing_probabilities.len(),
+    ) {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
+    let missing_probabilities = &missing_probabilities[..layout.missing * 8];
+
+    let mut rng = LogicalRng::new(seed, domain, iteration, item);
+    let mut sampled = vec![0u8; diplotypes.len()];
+    if rng.next_f64() < 0.5 {
+        sample_forward(
+            diplotypes,
+            &transition_probabilities[..layout.transitions],
+            &mut sampled,
+            &mut rng,
+        );
+    } else {
+        sample_backward(
+            diplotypes,
+            &transition_probabilities[..layout.transitions],
+            layout.transitions,
+            &mut sampled,
+            &mut rng,
+        );
+    }
+    apply_sample(
+        ApplySample {
+            variants,
+            ambiguous,
+            segment_lengths,
+            sampled: &sampled,
+            missing_probabilities,
+            haploid: haploid != 0,
+        },
+        &mut rng,
+    );
+    STATUS_OK
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,5 +788,38 @@ mod tests {
         assert_eq!(ambiguous, [0xa5]);
         assert_eq!(diplotypes, [0xa5a5_a5a5_a5a5_a5a5; 2]);
         assert_eq!(transitions, 0xa5a5_a5a5);
+    }
+
+    #[test]
+    fn graph_sampler_applies_sampled_diplotypes_without_changing_graph_codes() {
+        let mut variants = [0x22u8];
+        let ambiguous = [0xaa, 0xcc];
+        let diplotypes = [1u64 << 9, 1u64 << 18];
+        let lengths = [1u16, 1u16];
+        let transitions = [1.0f64, 1.0f64];
+        let status = unsafe {
+            shapeit_genotype_sample_v1(
+                variants.as_mut_ptr(),
+                variants.len(),
+                2,
+                ambiguous.as_ptr(),
+                ambiguous.len(),
+                diplotypes.as_ptr(),
+                diplotypes.len(),
+                lengths.as_ptr(),
+                lengths.len(),
+                transitions.as_ptr(),
+                transitions.len(),
+                core::ptr::null(),
+                0,
+                0,
+                15_052_011,
+                3,
+                7,
+                11,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(variants, [0xee]);
     }
 }

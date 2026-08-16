@@ -96,6 +96,22 @@ public:
 		return seed;
 	}
 
+	uint32_t getDomain() const {
+		return domain;
+	}
+
+	uint32_t getIteration() const {
+		return iteration;
+	}
+
+	uint64_t getItem() const {
+		return item;
+	}
+
+	bool isFresh() const {
+		return next_block == 0 && next_word == words.size();
+	}
+
 	random_number_generator fork(random_number_domain _domain, uint32_t _iteration, uint64_t _item) const {
 		return random_number_generator(seed, _domain, _iteration, _item);
 	}
