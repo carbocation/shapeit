@@ -1563,6 +1563,106 @@ struct ExtendedPrecisionOutcome {
     used_log_domain: bool,
 }
 
+#[inline]
+fn probability_is_valid<T>(probability: T) -> bool
+where
+    T: Copy + PartialOrd + From<u8>,
+{
+    probability >= T::from(0) && probability <= T::from(1)
+}
+
+/// Validate exactly the output blocks written by one window. Windows overlap
+/// at their boundary segment, so a noninitial window begins after the first
+/// segment's already-computed transition block.
+unsafe fn window_hmm_output_is_valid(inputs: &JobWindowInputs<'_>) -> bool {
+    let transitions = const_slice(
+        inputs.job.transition_probabilities,
+        inputs.job.transition_probabilities_length,
+    );
+    let segment_first = inputs.window.start_segment as usize;
+    let segment_last = inputs.window.stop_segment as usize;
+    let mut transition_cursor = if segment_first == 0 {
+        0
+    } else {
+        inputs.window.start_transition as usize
+    };
+    let transition_segment_first = if segment_first == 0 {
+        0
+    } else {
+        segment_first + 1
+    };
+    if transition_segment_first <= segment_last {
+        for segment in transition_segment_first..=segment_last {
+            let previous_count = if segment == 0 {
+                1
+            } else {
+                diplotype_count(inputs.diplotypes[segment - 1])
+            };
+            let current_count = diplotype_count(inputs.diplotypes[segment]);
+            let count = match previous_count.checked_mul(current_count) {
+                Some(value) => value,
+                None => return false,
+            };
+            let end = match transition_cursor.checked_add(count) {
+                Some(value) if value <= transitions.len() => value,
+                _ => return false,
+            };
+            let mut total = 0.0;
+            for &probability in &transitions[transition_cursor..end] {
+                if !probability.is_finite() || !probability_is_valid(probability) {
+                    return false;
+                }
+                total += probability;
+            }
+            if !total.is_finite() || total <= 0.0 {
+                return false;
+            }
+            transition_cursor = end;
+        }
+    }
+    let expected_transition_end = match inputs.window.stop_transition.checked_add(1) {
+        Some(value) => value as usize,
+        None => return false,
+    };
+    if transition_cursor != expected_transition_end {
+        return false;
+    }
+
+    if inputs.window.stop_missing >= inputs.window.start_missing {
+        let first = match (inputs.window.start_missing as usize).checked_mul(HAPLOTYPES) {
+            Some(value) => value,
+            None => return false,
+        };
+        let end = match (inputs.window.stop_missing as usize)
+            .checked_add(1)
+            .and_then(|value| value.checked_mul(HAPLOTYPES))
+        {
+            Some(value) if value <= inputs.job.missing_probabilities_length => value,
+            _ => return false,
+        };
+        let missing = const_slice(inputs.job.missing_probabilities, end);
+        for &probability in &missing[first..end] {
+            if !probability.is_finite() || !probability_is_valid(probability) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+unsafe fn run_job_window_log_validated(
+    inputs: &JobWindowInputs<'_>,
+    scratch: &mut Vec<f64>,
+    alpha_locus: &mut Vec<i32>,
+) -> Result<i32, u32> {
+    let outcome = log::run_job_window_log(inputs, scratch, alpha_locus)?;
+    if outcome >= 0 && !window_hmm_output_is_valid(inputs) {
+        Ok(-2)
+    } else {
+        Ok(outcome)
+    }
+}
+
 /// Run the existing f64 replay first, escalating to the log semiring only when
 /// f64 cannot retain a valid permitted mass. Both paths evaluate the same HMM;
 /// only the numerical representation changes.
@@ -1572,14 +1672,14 @@ unsafe fn run_job_window_extended_precision(
     alpha_locus: &mut Vec<i32>,
 ) -> Result<ExtendedPrecisionOutcome, u32> {
     let outcome = run_job_window_double(inputs, scratch, alpha_locus)?;
-    if outcome >= 0 {
+    if outcome >= 0 && window_hmm_output_is_valid(inputs) {
         return Ok(ExtendedPrecisionOutcome {
             outcome,
             used_log_domain: false,
         });
     }
 
-    let outcome = log::run_job_window_log(inputs, scratch, alpha_locus)?;
+    let outcome = run_job_window_log_validated(inputs, scratch, alpha_locus)?;
     Ok(ExtendedPrecisionOutcome {
         outcome,
         used_log_domain: true,
@@ -1666,27 +1766,11 @@ unsafe fn run_job_window_single(
     }
 }
 
-#[no_mangle]
-/// Run every HMM window in one Rust-owned conditioning job.
-///
-/// The function retains subset-transpose and HMM scratch capacity in the
-/// worker-local conditioning job. It also owns the established single-to-double
-/// fallback decision and persists that decision in the genotype graph.
-///
-/// # Safety
-///
-/// `parameters` and `result` must be valid for their types. The opaque graph
-/// and conditioning job must be live and exclusively borrowed. Every other
-/// buffer must be valid for its stated length and mutable buffers must not
-/// overlap inputs or each other.
-pub unsafe extern "C" fn shapeit_hmm_run_job_v1(
-    parameters: *const HmmJobV1,
-    result: *mut HmmJobResultV1,
+unsafe fn run_hmm_job_v1(
+    parameters: &HmmJobV1,
+    result: &mut HmmJobResultV1,
+    force_log_domain: bool,
 ) -> u32 {
-    if parameters.is_null() || result.is_null() {
-        return STATUS_NULL_POINTER;
-    }
-    let parameters = &*parameters;
     if parameters.abi_version != ABI_VERSION
         || parameters.struct_size as usize != mem::size_of::<HmmJobV1>()
         || parameters.haplotype_stride == 0
@@ -1826,7 +1910,13 @@ pub unsafe extern "C" fn shapeit_hmm_run_job_v1(
             locus_offset: (locus_first & 7) as u32,
             window: *window,
         };
-        let outcome = if require_double_precision {
+        let outcome = if force_log_domain {
+            match run_job_window_log_validated(&window_inputs, double_scratch, alpha_locus_scratch)
+            {
+                Ok(value) => value,
+                Err(status) => return status,
+            }
+        } else if require_double_precision {
             match run_job_window_extended_precision(
                 &window_inputs,
                 double_scratch,
@@ -1889,11 +1979,41 @@ pub unsafe extern "C" fn shapeit_hmm_run_job_v1(
     STATUS_OK
 }
 
+#[no_mangle]
+/// Run every HMM window in one Rust-owned conditioning job.
+///
+/// The function retains subset-transpose and HMM scratch capacity in the
+/// worker-local conditioning job. It also owns the established precision
+/// fallback decision and persists the f64 decision in the genotype graph.
+///
+/// # Safety
+///
+/// `parameters` and `result` must be valid for their types. The opaque graph
+/// and conditioning job must be live and exclusively borrowed. Every other
+/// buffer must be valid for its stated length and mutable buffers must not
+/// overlap inputs or each other.
+pub unsafe extern "C" fn shapeit_hmm_run_job_v1(
+    parameters: *const HmmJobV1,
+    result: *mut HmmJobResultV1,
+) -> u32 {
+    if parameters.is_null() || result.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    run_hmm_job_v1(&*parameters, &mut *result, false)
+}
+
 #[inline]
 fn transition_probabilities_are_valid(probabilities: &[f64]) -> bool {
     probabilities
         .iter()
-        .all(|probability| probability.is_finite() && *probability >= 0.0)
+        .all(|&probability| probability.is_finite() && probability_is_valid(probability))
+}
+
+#[inline]
+fn missing_probabilities_are_valid(probabilities: &[f32]) -> bool {
+    probabilities
+        .iter()
+        .all(|&probability| probability.is_finite() && probability_is_valid(probability))
 }
 
 fn sample_complete_hmm_output(
@@ -1909,7 +2029,9 @@ fn sample_complete_hmm_output(
     // an invalid transition in an unvisited block. Validate the complete HMM
     // output before sampling so every numerical failure takes the precision
     // retry path.
-    if !transition_probabilities_are_valid(transition_probabilities) {
+    if !transition_probabilities_are_valid(transition_probabilities)
+        || !missing_probabilities_are_valid(missing_probabilities)
+    {
         return Err(SampleError::DegenerateDistribution);
     }
     sample_graph_current(
@@ -2000,7 +2122,7 @@ pub unsafe extern "C" fn shapeit_hmm_run_phase_job_v1(
         missing_probabilities_length: missing_probabilities.len(),
     };
     let mut local_result = HmmJobResultV1::default();
-    let mut hmm_status = shapeit_hmm_run_job_v1(&hmm_parameters, &mut local_result);
+    let mut hmm_status = run_hmm_job_v1(&hmm_parameters, &mut local_result, false);
     let mut sample_result = if hmm_status == STATUS_OK && local_result.fatal_outcome == 0 {
         sample_complete_hmm_output(
             &mut *parameters.graph,
@@ -2021,7 +2143,7 @@ pub unsafe extern "C" fn shapeit_hmm_run_phase_job_v1(
     if sample_result == Err(SampleError::DegenerateDistribution) && !initially_requires_double {
         (*parameters.graph).require_double_precision();
         let mut retry_result = HmmJobResultV1::default();
-        hmm_status = shapeit_hmm_run_job_v1(&hmm_parameters, &mut retry_result);
+        hmm_status = run_hmm_job_v1(&hmm_parameters, &mut retry_result, false);
         if hmm_status == STATUS_OK && retry_result.fatal_outcome == 0 {
             retry_result.underflow_recovered_precision =
                 match retry_result.underflow_recovered_precision.checked_add(1) {
@@ -2040,6 +2162,39 @@ pub unsafe extern "C" fn shapeit_hmm_run_phase_job_v1(
             );
         } else {
             local_result = retry_result;
+            sample_result = Err(SampleError::Status(hmm_status));
+        }
+    }
+
+    // f64 can retain a finite total while still emitting an unusable
+    // conditional row or missing probability. If complete validation or the
+    // sampler finds that case, replay every window in the log semiring once.
+    if sample_result == Err(SampleError::DegenerateDistribution)
+        && hmm_status == STATUS_OK
+        && local_result.fatal_outcome == 0
+    {
+        (*parameters.graph).require_double_precision();
+        let prior_precision_recoveries = local_result.underflow_recovered_precision;
+        let mut log_result = HmmJobResultV1::default();
+        hmm_status = run_hmm_job_v1(&hmm_parameters, &mut log_result, true);
+        if hmm_status == STATUS_OK && log_result.fatal_outcome == 0 {
+            log_result.underflow_recovered_precision =
+                match prior_precision_recoveries.checked_add(1) {
+                    Some(value) => value,
+                    None => return STATUS_INTEGER_OVERFLOW,
+                };
+            local_result = log_result;
+            sample_result = sample_complete_hmm_output(
+                &mut *parameters.graph,
+                &transition_probabilities[..transition_count],
+                &missing_probabilities[..missing_probability_count],
+                parameters.sample_seed,
+                parameters.sample_domain,
+                parameters.sample_iteration,
+                parameters.sample_item,
+            );
+        } else {
+            local_result = log_result;
             sample_result = Err(SampleError::Status(hmm_status));
         }
     }
@@ -3005,12 +3160,12 @@ mod tests {
             start_segment: 0,
             start_ambiguous: 0,
             start_missing: 0,
-            start_transition: 1,
+            start_transition: 64,
             stop_locus: 0,
             stop_segment: 0,
             stop_ambiguous: -1,
             stop_missing: -1,
-            stop_transition: 0,
+            stop_transition: 63,
         });
         conditioning_job.states.push((0..8).collect());
 
@@ -3050,6 +3205,16 @@ mod tests {
         assert!((transitions.iter().sum::<f64>() - 1.0).abs() < 1e-12);
         assert!(!conditioning_job.subset_haplotypes.is_empty());
         assert!(!conditioning_job.single_scratch.is_empty());
+
+        transitions.fill(0.0);
+        transitions[0] = f64::NAN;
+        let mut forced_log_result = HmmJobResultV1::default();
+        let forced_log_status =
+            unsafe { run_hmm_job_v1(&parameters, &mut forced_log_result, true) };
+        assert_eq!(forced_log_status, STATUS_OK);
+        assert_eq!(forced_log_result.fatal_outcome, 0);
+        assert_eq!(forced_log_result.windows_completed, 1);
+        assert!((transitions.iter().sum::<f64>() - 1.0).abs() < 1e-12);
 
         let phase_parameters = HmmPhaseJobV1 {
             abi_version: ABI_VERSION,
@@ -3101,7 +3266,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_hmm_output_validation_rejects_unvisited_invalid_transitions() {
+    fn complete_hmm_output_validation_rejects_invalid_probabilities() {
         assert!(transition_probabilities_are_valid(&[0.0, 0.25, 0.75]));
         assert!(!transition_probabilities_are_valid(&[f64::NAN, 0.25, 0.75]));
         assert!(!transition_probabilities_are_valid(&[
@@ -3114,6 +3279,11 @@ mod tests {
             -0.0 - 1e-12,
             0.75
         ]));
+        assert!(!transition_probabilities_are_valid(&[0.25, 1.000_001]));
+        assert!(missing_probabilities_are_valid(&[0.0, 0.25, 1.0]));
+        assert!(!missing_probabilities_are_valid(&[0.0, f32::NAN, 1.0]));
+        assert!(!missing_probabilities_are_valid(&[0.0, -0.01, 1.0]));
+        assert!(!missing_probabilities_are_valid(&[0.0, 0.25, 1.01]));
     }
 
     #[test]
@@ -3403,6 +3573,12 @@ mod tests {
         for (&double, &logged) in double_missing.iter().zip(log_missing.iter()) {
             assert!((double - logged).abs() < 1e-6, "{double} != {logged}");
         }
+        assert!(unsafe { window_hmm_output_is_valid(&log_inputs) });
+        log_missing[3] = f32::NAN;
+        assert!(!unsafe { window_hmm_output_is_valid(&log_inputs) });
+        log_missing[3] = double_missing[3];
+        log_transitions[4] = -1.0;
+        assert!(!unsafe { window_hmm_output_is_valid(&log_inputs) });
     }
 
     #[test]
