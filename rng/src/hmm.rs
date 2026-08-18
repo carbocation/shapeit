@@ -1213,7 +1213,10 @@ impl DoubleEngine<'_> {
         total.is_nan() || total.is_infinite() || total < f64::MIN_POSITIVE
     }
 
-    fn set_first_transitions(&mut self) {
+    fn set_first_transitions(&mut self) -> bool {
+        if !self.prob_sum_t.is_finite() || self.prob_sum_t < f64::MIN_POSITIVE {
+            return true;
+        }
         let scale = 1.0 / self.prob_sum_t;
         let mut probabilities = [0.0; 64];
         let mut total = 0.0;
@@ -1228,6 +1231,13 @@ impl DoubleEngine<'_> {
             total += value;
             count += 1;
         }
+        // The dense HMM can retain finite mass while every diplotype allowed
+        // by the first graph segment has underflowed to zero. This contraction
+        // was the one initial-distribution normalization without an underflow
+        // guard in the established implementation.
+        if !total.is_finite() || total < f64::MIN_POSITIVE {
+            return true;
+        }
         let scale_diplotype = 1.0 / total;
         for (target, &value) in self.transition_probabilities[..count]
             .iter_mut()
@@ -1235,6 +1245,7 @@ impl DoubleEngine<'_> {
         {
             *target = value * scale_diplotype;
         }
+        false
     }
 
     fn set_other_transitions(
@@ -1412,7 +1423,9 @@ impl DoubleEngine<'_> {
             }
 
             if locus == 0 {
-                self.set_first_transitions();
+                if self.set_first_transitions() {
+                    return -2;
+                }
             }
             if segment_locus == 0 && locus != self.locus_first {
                 let result =
@@ -1836,6 +1849,40 @@ pub unsafe extern "C" fn shapeit_hmm_run_job_v1(
     STATUS_OK
 }
 
+#[inline]
+fn transition_probabilities_are_valid(probabilities: &[f64]) -> bool {
+    probabilities
+        .iter()
+        .all(|probability| probability.is_finite() && *probability >= 0.0)
+}
+
+fn sample_complete_hmm_output(
+    graph: &mut GenotypeGraphV1,
+    transition_probabilities: &[f64],
+    missing_probabilities: &[f32],
+    seed: u64,
+    domain: u32,
+    iteration: u32,
+    item: u64,
+) -> Result<(), SampleError> {
+    // Sampling follows only one path through the graph and can therefore miss
+    // an invalid transition in an unvisited block. Validate the complete HMM
+    // output before sampling so every numerical failure takes the precision
+    // retry path.
+    if !transition_probabilities_are_valid(transition_probabilities) {
+        return Err(SampleError::DegenerateDistribution);
+    }
+    sample_graph_current(
+        graph,
+        transition_probabilities,
+        missing_probabilities,
+        seed,
+        domain,
+        iteration,
+        item,
+    )
+}
+
 #[no_mangle]
 /// Run one complete common-phasing sample job, including its MCMC stage action.
 ///
@@ -1915,7 +1962,7 @@ pub unsafe extern "C" fn shapeit_hmm_run_phase_job_v1(
     let mut local_result = HmmJobResultV1::default();
     let mut hmm_status = shapeit_hmm_run_job_v1(&hmm_parameters, &mut local_result);
     let mut sample_result = if hmm_status == STATUS_OK && local_result.fatal_outcome == 0 {
-        sample_graph_current(
+        sample_complete_hmm_output(
             &mut *parameters.graph,
             &transition_probabilities[..transition_count],
             &missing_probabilities[..missing_probability_count],
@@ -1942,7 +1989,7 @@ pub unsafe extern "C" fn shapeit_hmm_run_phase_job_v1(
                     None => return STATUS_INTEGER_OVERFLOW,
                 };
             local_result = retry_result;
-            sample_result = sample_graph_current(
+            sample_result = sample_complete_hmm_output(
                 &mut *parameters.graph,
                 &transition_probabilities[..transition_count],
                 &missing_probabilities[..missing_probability_count],
@@ -3014,7 +3061,23 @@ mod tests {
     }
 
     #[test]
-    fn single_locus_segment_normalizes_first_diplotypes() {
+    fn complete_hmm_output_validation_rejects_unvisited_invalid_transitions() {
+        assert!(transition_probabilities_are_valid(&[0.0, 0.25, 0.75]));
+        assert!(!transition_probabilities_are_valid(&[f64::NAN, 0.25, 0.75]));
+        assert!(!transition_probabilities_are_valid(&[
+            0.25,
+            f64::INFINITY,
+            0.75
+        ]));
+        assert!(!transition_probabilities_are_valid(&[
+            0.25,
+            -0.0 - 1e-12,
+            0.75
+        ]));
+    }
+
+    #[test]
+    fn double_precision_initial_diplotypes_preserve_tiny_mass() {
         let variants = [0u8];
         let lengths = [1u16];
         let diplotypes = [(1u64 << 0) | (1u64 << 9)];
@@ -3025,7 +3088,7 @@ mod tests {
         let layout = scratch_layout(8, 1, 0).unwrap();
         let mut scratch = vec![0.0; layout.total];
         let mut alpha_locus = [0i32; 1];
-        let parameters = HmmSegmentDoubleV1 {
+        let mut parameters = HmmSegmentDoubleV1 {
             abi_version: ABI_VERSION,
             struct_size: mem::size_of::<HmmSegmentDoubleV1>() as u32,
             variants: variants.as_ptr(),
@@ -3075,6 +3138,49 @@ mod tests {
         assert_eq!(status, STATUS_OK);
         assert_eq!(outcome, 0);
         assert_eq!(transitions, [0.5, 0.5]);
+
+        // Twenty ordinary 1e-4 mismatches drive the permitted haplotype lane
+        // below f32 range while remaining representable in f64. This is the
+        // numerical condition that must be recoverable by a double HMM pass.
+        let zero_support_variants = [0x22u8; 10];
+        let zero_support_ambiguous = [0b1111_0000u8; 20];
+        let zero_support_diplotypes = [1u64 << 36];
+        let zero_support_lengths = [20u16];
+        let zero_support_haplotypes = [0u8; 20];
+        let zero_support_centimorgans = [0.0f32; 20];
+        let zero_support_recombination = [0.0f32; 19];
+        let zero_support_rare_alleles = [-1i8; 20];
+        let mut zero_support_transitions = [7.0f64];
+        parameters.variants = zero_support_variants.as_ptr();
+        parameters.variants_length = zero_support_variants.len();
+        parameters.ambiguous = zero_support_ambiguous.as_ptr();
+        parameters.ambiguous_length = zero_support_ambiguous.len();
+        parameters.segment_lengths = zero_support_lengths.as_ptr();
+        parameters.diplotypes = zero_support_diplotypes.as_ptr();
+        parameters.diplotypes_length = zero_support_diplotypes.len();
+        parameters.haplotypes = zero_support_haplotypes.as_ptr();
+        parameters.haplotypes_length = zero_support_haplotypes.len();
+        parameters.centimorgans = zero_support_centimorgans.as_ptr();
+        parameters.centimorgans_length = zero_support_centimorgans.len();
+        parameters.recombination = zero_support_recombination.as_ptr();
+        parameters.recombination_length = zero_support_recombination.len();
+        parameters.rare_alleles = zero_support_rare_alleles.as_ptr();
+        parameters.rare_alleles_length = zero_support_rare_alleles.len();
+        parameters.emission_match = 0.9999;
+        parameters.emission_mismatch = 0.0001;
+        parameters.locus_last = 19;
+        parameters.ambiguous_first = 0;
+        parameters.ambiguous_last = 19;
+        parameters.transition_first = 1;
+        parameters.transition_last = 0;
+        parameters.transition_probabilities = zero_support_transitions.as_mut_ptr();
+        parameters.transition_probabilities_length = zero_support_transitions.len();
+        let mut zero_support_outcome = i32::MIN;
+        let zero_support_status =
+            unsafe { shapeit_hmm_run_segment_double_v1(&parameters, &mut zero_support_outcome) };
+        assert_eq!(zero_support_status, STATUS_OK);
+        assert_eq!(zero_support_outcome, 0);
+        assert_eq!(zero_support_transitions, [1.0]);
     }
 
     #[test]

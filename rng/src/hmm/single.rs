@@ -2248,7 +2248,10 @@ impl SingleEngine<'_> {
         total.is_nan() || total.is_infinite() || total < f64::MIN_POSITIVE
     }
 
-    fn set_first_transitions(&mut self) {
+    fn set_first_transitions(&mut self) -> bool {
+        if !self.prob_sum_t.is_finite() || self.prob_sum_t < f32::MIN_POSITIVE {
+            return true;
+        }
         let scale = f64::from(1.0f32 / self.prob_sum_t);
         let mut probabilities = [0.0f64; 64];
         let mut total = 0.0f64;
@@ -2263,6 +2266,13 @@ impl SingleEngine<'_> {
             total += value;
             count += 1;
         }
+        // The dense HMM can retain finite mass while every diplotype allowed
+        // by the first graph segment has underflowed to zero. Signal this just
+        // like the guarded inter-segment contractions so the window is rerun
+        // in double precision before any invalid value is published.
+        if !total.is_finite() || total < f64::MIN_POSITIVE {
+            return true;
+        }
         let scaling = 1.0 / total;
         for (target, &value) in self.transition_probabilities[..count]
             .iter_mut()
@@ -2270,6 +2280,7 @@ impl SingleEngine<'_> {
         {
             *target = value * scaling;
         }
+        false
     }
 
     fn set_other_transitions(
@@ -2491,7 +2502,9 @@ impl SingleEngine<'_> {
             }
 
             if locus == 0 {
-                self.set_first_transitions();
+                if self.set_first_transitions() {
+                    return -2;
+                }
             }
             if segment_locus == 0 && locus != self.locus_first {
                 let result =
@@ -2949,7 +2962,7 @@ mod tests {
     }
 
     #[test]
-    fn single_precision_locus_normalizes_first_diplotypes() {
+    fn single_precision_initial_diplotypes_normalize_or_report_underflow() {
         let variants = [0u8];
         let lengths = [1u16];
         let diplotypes = [(1u64 << 0) | (1u64 << 9)];
@@ -3031,5 +3044,69 @@ mod tests {
         assert_eq!(status, STATUS_OK);
         assert_eq!(outcome, 0);
         assert_eq!(transitions, [0.499_999_999_999_999_94; 2]);
+
+        // Twenty ordinary 1e-4 mismatches drive the permitted haplotype lane
+        // below f32 range while other dense lanes remain finite. This is the
+        // initial-distribution underflow that previously escaped all guards.
+        let zero_support_variants = [0x22u8; 10];
+        let zero_support_ambiguous = [0b1111_0000u8; 20];
+        let zero_support_diplotypes = [1u64 << 36];
+        let zero_support_lengths = [20u16];
+        let zero_support_haplotypes = [0u8; 20];
+        let zero_support_centimorgans = [0.0f32; 20];
+        let zero_support_recombination = [0.0f32; 19];
+        let zero_support_rare_alleles = [-1i8; 20];
+        let mut zero_support_transitions = [7.0f64];
+        parameters.variants = zero_support_variants.as_ptr();
+        parameters.variants_length = zero_support_variants.len();
+        parameters.ambiguous = zero_support_ambiguous.as_ptr();
+        parameters.ambiguous_length = zero_support_ambiguous.len();
+        parameters.segment_lengths = zero_support_lengths.as_ptr();
+        parameters.diplotypes = zero_support_diplotypes.as_ptr();
+        parameters.diplotypes_length = zero_support_diplotypes.len();
+        parameters.haplotypes = zero_support_haplotypes.as_ptr();
+        parameters.haplotypes_length = zero_support_haplotypes.len();
+        parameters.centimorgans = zero_support_centimorgans.as_ptr();
+        parameters.centimorgans_length = zero_support_centimorgans.len();
+        parameters.recombination = zero_support_recombination.as_ptr();
+        parameters.recombination_length = zero_support_recombination.len();
+        parameters.rare_alleles = zero_support_rare_alleles.as_ptr();
+        parameters.rare_alleles_length = zero_support_rare_alleles.len();
+        parameters.emission_match = 0.9999;
+        parameters.emission_mismatch = 0.0001;
+        parameters.locus_last = 19;
+        parameters.ambiguous_first = 0;
+        parameters.ambiguous_last = 19;
+        parameters.transition_first = 1;
+        parameters.transition_last = 0;
+        parameters.transition_probabilities = zero_support_transitions.as_mut_ptr();
+        parameters.transition_probabilities_length = zero_support_transitions.len();
+        let mut zero_float_length = 0;
+        let mut zero_alpha_locus_length = 0;
+        let mut zero_index_length = 0;
+        let zero_scratch_status = unsafe {
+            shapeit_hmm_single_scratch_len_v1(
+                &parameters,
+                &mut zero_float_length,
+                &mut zero_alpha_locus_length,
+                &mut zero_index_length,
+            )
+        };
+        assert_eq!(zero_scratch_status, STATUS_OK);
+        scratch.resize(zero_float_length, 0.0);
+        alpha_locus.resize(zero_alpha_locus_length, 0);
+        indexes.resize(zero_index_length, 0);
+        parameters.scratch = scratch.as_mut_ptr();
+        parameters.scratch_length = scratch.len();
+        parameters.alpha_locus_scratch = alpha_locus.as_mut_ptr();
+        parameters.alpha_locus_scratch_length = alpha_locus.len();
+        parameters.index_scratch = indexes.as_mut_ptr();
+        parameters.index_scratch_length = indexes.len();
+        let mut zero_support_outcome = i32::MIN;
+        let zero_support_status =
+            unsafe { shapeit_hmm_run_segment_single_v1(&parameters, &mut zero_support_outcome) };
+        assert_eq!(zero_support_status, STATUS_OK);
+        assert_eq!(zero_support_outcome, -2);
+        assert_eq!(zero_support_transitions, [7.0]);
     }
 }
