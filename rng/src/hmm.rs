@@ -1557,6 +1557,35 @@ unsafe fn run_job_window_double(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExtendedPrecisionOutcome {
+    outcome: i32,
+    used_log_domain: bool,
+}
+
+/// Run the existing f64 replay first, escalating to the log semiring only when
+/// f64 cannot retain a valid permitted mass. Both paths evaluate the same HMM;
+/// only the numerical representation changes.
+unsafe fn run_job_window_extended_precision(
+    inputs: &JobWindowInputs<'_>,
+    scratch: &mut Vec<f64>,
+    alpha_locus: &mut Vec<i32>,
+) -> Result<ExtendedPrecisionOutcome, u32> {
+    let outcome = run_job_window_double(inputs, scratch, alpha_locus)?;
+    if outcome >= 0 {
+        return Ok(ExtendedPrecisionOutcome {
+            outcome,
+            used_log_domain: false,
+        });
+    }
+
+    let outcome = log::run_job_window_log(inputs, scratch, alpha_locus)?;
+    Ok(ExtendedPrecisionOutcome {
+        outcome,
+        used_log_domain: true,
+    })
+}
+
 unsafe fn run_job_window_single(
     inputs: &JobWindowInputs<'_>,
     scratch: &mut Vec<f32>,
@@ -1798,8 +1827,17 @@ pub unsafe extern "C" fn shapeit_hmm_run_job_v1(
             window: *window,
         };
         let outcome = if require_double_precision {
-            match run_job_window_double(&window_inputs, double_scratch, alpha_locus_scratch) {
-                Ok(value) => value,
+            match run_job_window_extended_precision(
+                &window_inputs,
+                double_scratch,
+                alpha_locus_scratch,
+            ) {
+                Ok(value) => {
+                    if value.used_log_domain && value.outcome >= 0 {
+                        local_result.underflow_recovered_precision += 1;
+                    }
+                    value.outcome
+                }
                 Err(status) => return status,
             }
         } else {
@@ -1815,7 +1853,7 @@ pub unsafe extern "C" fn shapeit_hmm_run_job_v1(
             if single_outcome == 0 {
                 single_outcome
             } else {
-                let double_outcome = match run_job_window_double(
+                let extended_outcome = match run_job_window_extended_precision(
                     &window_inputs,
                     double_scratch,
                     alpha_locus_scratch,
@@ -1824,8 +1862,10 @@ pub unsafe extern "C" fn shapeit_hmm_run_job_v1(
                     Err(status) => return status,
                 };
                 require_double_precision = true;
-                local_result.underflow_recovered_precision += 1;
-                double_outcome
+                if extended_outcome.outcome >= 0 {
+                    local_result.underflow_recovered_precision += 1;
+                }
+                extended_outcome.outcome
             }
         };
         local_result.windows_completed += 1;
@@ -3184,6 +3224,188 @@ mod tests {
     }
 
     #[test]
+    fn log_replay_recovers_permitted_mass_beyond_f64_range() {
+        // The only permitted diplotype uses two lanes that each incur 100
+        // 1e-4 mismatches. Its mass is mathematically nonzero but far below
+        // the f64 range after the diplotype contraction.
+        let variants = [0x22u8; 50];
+        let ambiguous = [0b1111_0000u8; 100];
+        let segment_lengths = [100u16];
+        let diplotypes = [1u64 << 36];
+        let haplotypes = [0u8; 100];
+        let centimorgans = [0.0f32; 100];
+        let recombination = [0.0f32; 99];
+        let rare_alleles = [-1i8; 100];
+        let mut transitions = [7.0f64];
+        let job = HmmJobV1 {
+            abi_version: ABI_VERSION,
+            struct_size: mem::size_of::<HmmJobV1>() as u32,
+            graph: ptr::null_mut(),
+            conditioning_job: ptr::null_mut(),
+            haplotypes: ptr::null(),
+            haplotypes_length: 0,
+            haplotype_stride: 1,
+            centimorgans: centimorgans.as_ptr(),
+            centimorgans_length: centimorgans.len(),
+            recombination: recombination.as_ptr(),
+            recombination_length: recombination.len(),
+            rare_alleles: rare_alleles.as_ptr(),
+            rare_alleles_length: rare_alleles.len(),
+            effective_population_size: 15_000,
+            total_haplotypes: 16,
+            emission_match: 0.9999,
+            emission_mismatch: 0.0001,
+            transition_probabilities: transitions.as_mut_ptr(),
+            transition_probabilities_length: transitions.len(),
+            missing_probabilities: ptr::null_mut(),
+            missing_probabilities_length: 0,
+        };
+        let inputs = JobWindowInputs {
+            job: &job,
+            variants: &variants,
+            ambiguous: &ambiguous,
+            segment_lengths: &segment_lengths,
+            diplotypes: &diplotypes,
+            subset_haplotypes: &haplotypes,
+            subset_stride: 1,
+            conditioning_haplotypes: 8,
+            locus_offset: 0,
+            window: GenotypeWindowV1 {
+                start_locus: 0,
+                start_segment: 0,
+                start_ambiguous: 0,
+                start_missing: 0,
+                start_transition: 1,
+                stop_locus: 99,
+                stop_segment: 0,
+                stop_ambiguous: 99,
+                stop_missing: -1,
+                stop_transition: 0,
+            },
+        };
+        let mut scratch = Vec::new();
+        let mut alpha_locus = Vec::new();
+
+        let double_outcome =
+            unsafe { run_job_window_double(&inputs, &mut scratch, &mut alpha_locus) }.unwrap();
+        assert_eq!(double_outcome, -2);
+
+        let recovered =
+            unsafe { run_job_window_extended_precision(&inputs, &mut scratch, &mut alpha_locus) }
+                .unwrap();
+        assert_eq!(
+            recovered,
+            ExtendedPrecisionOutcome {
+                outcome: 0,
+                used_log_domain: true,
+            }
+        );
+        assert_eq!(transitions, [1.0]);
+    }
+
+    #[test]
+    fn log_replay_matches_double_on_ordinary_window() {
+        let variants = [0x12u8, 0x20, 0x01];
+        let ambiguous = [0b1010_1010u8, 0b1100_1100];
+        let segment_lengths = [3u16, 3];
+        let diplotypes = [(1u64 << 0) | (1u64 << 9), (1u64 << 9) | (1u64 << 18)];
+        let haplotypes = [
+            0b0101_1010u8,
+            0b0011_1100,
+            0b1111_0000,
+            0b1001_0110,
+            0b0110_1001,
+            0b1100_0011,
+        ];
+        let centimorgans = [0.0f32, 0.01, 0.02, 0.04, 0.07, 0.11];
+        let recombination = [0.01f32; 5];
+        let rare_alleles = [-1i8; 6];
+        let mut double_transitions = [0.0f64; 6];
+        let mut double_missing = [0.0f32; 16];
+        let mut log_transitions = [0.0f64; 6];
+        let mut log_missing = [0.0f32; 16];
+        let mut job = HmmJobV1 {
+            abi_version: ABI_VERSION,
+            struct_size: mem::size_of::<HmmJobV1>() as u32,
+            graph: ptr::null_mut(),
+            conditioning_job: ptr::null_mut(),
+            haplotypes: ptr::null(),
+            haplotypes_length: 0,
+            haplotype_stride: 1,
+            centimorgans: centimorgans.as_ptr(),
+            centimorgans_length: centimorgans.len(),
+            recombination: recombination.as_ptr(),
+            recombination_length: recombination.len(),
+            rare_alleles: rare_alleles.as_ptr(),
+            rare_alleles_length: rare_alleles.len(),
+            effective_population_size: 15_000,
+            total_haplotypes: 16,
+            emission_match: f64::from(0.9999f32),
+            emission_mismatch: f64::from(0.0001f32),
+            transition_probabilities: double_transitions.as_mut_ptr(),
+            transition_probabilities_length: double_transitions.len(),
+            missing_probabilities: double_missing.as_mut_ptr(),
+            missing_probabilities_length: double_missing.len(),
+        };
+        let window = GenotypeWindowV1 {
+            start_locus: 0,
+            start_segment: 0,
+            start_ambiguous: 0,
+            start_missing: 0,
+            start_transition: 2,
+            stop_locus: 5,
+            stop_segment: 1,
+            stop_ambiguous: 1,
+            stop_missing: 1,
+            stop_transition: 5,
+        };
+        let mut scratch = Vec::new();
+        let mut alpha_locus = Vec::new();
+        let double_inputs = JobWindowInputs {
+            job: &job,
+            variants: &variants,
+            ambiguous: &ambiguous,
+            segment_lengths: &segment_lengths,
+            diplotypes: &diplotypes,
+            subset_haplotypes: &haplotypes,
+            subset_stride: 1,
+            conditioning_haplotypes: 8,
+            locus_offset: 0,
+            window,
+        };
+        assert_eq!(
+            unsafe { run_job_window_double(&double_inputs, &mut scratch, &mut alpha_locus) },
+            Ok(0)
+        );
+
+        job.transition_probabilities = log_transitions.as_mut_ptr();
+        job.missing_probabilities = log_missing.as_mut_ptr();
+        let log_inputs = JobWindowInputs {
+            job: &job,
+            variants: &variants,
+            ambiguous: &ambiguous,
+            segment_lengths: &segment_lengths,
+            diplotypes: &diplotypes,
+            subset_haplotypes: &haplotypes,
+            subset_stride: 1,
+            conditioning_haplotypes: 8,
+            locus_offset: 0,
+            window,
+        };
+        assert_eq!(
+            unsafe { log::run_job_window_log(&log_inputs, &mut scratch, &mut alpha_locus) },
+            Ok(0)
+        );
+
+        for (&double, &logged) in double_transitions.iter().zip(log_transitions.iter()) {
+            assert!((double - logged).abs() < 1e-12, "{double} != {logged}");
+        }
+        for (&double, &logged) in double_missing.iter().zip(log_missing.iter()) {
+            assert!((double - logged).abs() < 1e-6, "{double} != {logged}");
+        }
+    }
+
+    #[test]
     fn invalid_layout_does_not_write_outputs() {
         let variants = [0u8];
         let lengths = [1u16];
@@ -3248,4 +3470,5 @@ mod tests {
     }
 }
 
+mod log;
 mod single;
