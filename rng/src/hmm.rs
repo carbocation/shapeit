@@ -16,8 +16,8 @@ use crate::conditioning::{
     shapeit_conditioning_graph_job_build_v1, ConditioningGraphBuildV1, ConditioningJobV1,
 };
 use crate::genotype::{
-    shapeit_genotype_graph_prune_v1, shapeit_genotype_graph_sample_current_v1,
-    shapeit_genotype_graph_store_v1, GenotypeGraphV1, GenotypeWindowV1,
+    sample_graph_current, shapeit_genotype_graph_prune_v1, shapeit_genotype_graph_store_v1,
+    GenotypeGraphV1, GenotypeWindowV1, SampleError,
 };
 use crate::ibd2::{Ibd2StatsV1, Ibd2TracksV1};
 use crate::pbwt::{
@@ -1869,11 +1869,11 @@ pub unsafe extern "C" fn shapeit_hmm_run_phase_job_v1(
     if parameters.graph.is_null() || parameters.conditioning_job.is_null() {
         return STATUS_NULL_POINTER;
     }
-    let graph = &*parameters.graph;
-    if !graph.is_built() {
+    if !(*parameters.graph).is_built() {
         return STATUS_INVALID_DIMENSIONS;
     }
-    let (_, transition_count, missing_count) = graph.hmm_dimensions();
+    let initially_requires_double = (*parameters.graph).requires_double_precision();
+    let (_, transition_count, missing_count) = (*parameters.graph).hmm_dimensions();
     let missing_probability_count = match missing_count.checked_mul(HAPLOTYPES) {
         Some(value) => value,
         None => return STATUS_INTEGER_OVERFLOW,
@@ -1913,25 +1913,57 @@ pub unsafe extern "C" fn shapeit_hmm_run_phase_job_v1(
         missing_probabilities_length: missing_probabilities.len(),
     };
     let mut local_result = HmmJobResultV1::default();
-    let hmm_status = shapeit_hmm_run_job_v1(&hmm_parameters, &mut local_result);
-    let operation_status = if hmm_status != STATUS_OK || local_result.fatal_outcome != 0 {
-        hmm_status
-    } else {
-        let sample_status = shapeit_genotype_graph_sample_current_v1(
-            parameters.graph,
-            transition_probabilities.as_ptr(),
-            transition_probabilities.len(),
-            missing_probabilities.as_ptr(),
-            missing_probabilities.len(),
+    let mut hmm_status = shapeit_hmm_run_job_v1(&hmm_parameters, &mut local_result);
+    let mut sample_result = if hmm_status == STATUS_OK && local_result.fatal_outcome == 0 {
+        sample_graph_current(
+            &mut *parameters.graph,
+            &transition_probabilities[..transition_count],
+            &missing_probabilities[..missing_probability_count],
             parameters.sample_seed,
             parameters.sample_domain,
             parameters.sample_iteration,
             parameters.sample_item,
-        );
-        if sample_status != STATUS_OK {
-            sample_status
+        )
+    } else {
+        Err(SampleError::Status(hmm_status))
+    };
+
+    // A zero-mass conditional row means the single-precision windows did not
+    // retain a usable path. Recompute the complete job in double precision so
+    // every transition block belongs to the same precision regime.
+    if sample_result == Err(SampleError::DegenerateDistribution) && !initially_requires_double {
+        (*parameters.graph).require_double_precision();
+        let mut retry_result = HmmJobResultV1::default();
+        hmm_status = shapeit_hmm_run_job_v1(&hmm_parameters, &mut retry_result);
+        if hmm_status == STATUS_OK && retry_result.fatal_outcome == 0 {
+            retry_result.underflow_recovered_precision =
+                match retry_result.underflow_recovered_precision.checked_add(1) {
+                    Some(value) => value,
+                    None => return STATUS_INTEGER_OVERFLOW,
+                };
+            local_result = retry_result;
+            sample_result = sample_graph_current(
+                &mut *parameters.graph,
+                &transition_probabilities[..transition_count],
+                &missing_probabilities[..missing_probability_count],
+                parameters.sample_seed,
+                parameters.sample_domain,
+                parameters.sample_iteration,
+                parameters.sample_item,
+            );
         } else {
-            match parameters.stage {
+            local_result = retry_result;
+            sample_result = Err(SampleError::Status(hmm_status));
+        }
+    }
+
+    let operation_status = if hmm_status != STATUS_OK || local_result.fatal_outcome != 0 {
+        hmm_status
+    } else {
+        match sample_result {
+            Err(SampleError::Status(status)) => status,
+            Err(SampleError::DegenerateDistribution) => STATUS_INVALID_DIMENSIONS,
+            Ok(()) => match parameters.stage {
                 STAGE_BURN => STATUS_OK,
                 STAGE_PRUNE => shapeit_genotype_graph_prune_v1(
                     parameters.graph,
@@ -1947,7 +1979,7 @@ pub unsafe extern "C" fn shapeit_hmm_run_phase_job_v1(
                     missing_probability_count,
                 ),
                 _ => STATUS_INVALID_DIMENSIONS,
-            }
+            },
         }
     };
 

@@ -97,6 +97,21 @@ struct SampleLayout {
     missing: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SampleError {
+    Status(u32),
+    DegenerateDistribution,
+}
+
+impl SampleError {
+    fn status(self) -> u32 {
+        match self {
+            Self::Status(status) => status,
+            Self::DegenerateDistribution => STATUS_INVALID_DIMENSIONS,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GenotypeWindowV1 {
@@ -1034,16 +1049,23 @@ fn validate_sample_layout(
 }
 
 #[inline]
-fn sample_probabilities(probabilities: &[f64], total: f64, rng: &mut LogicalRng) -> usize {
+fn sample_probabilities(
+    probabilities: &[f64],
+    total: f64,
+    rng: &mut LogicalRng,
+) -> Result<usize, SampleError> {
+    if probabilities.is_empty() || !total.is_finite() || total <= 0.0 {
+        return Err(SampleError::DegenerateDistribution);
+    }
     let mut cumulative = probabilities[0];
     let draw = rng.next_f64() * total;
     for index in 0..probabilities.len() - 1 {
         if draw < cumulative {
-            return index;
+            return Ok(index);
         }
         cumulative += probabilities[index + 1];
     }
-    probabilities.len() - 1
+    Ok(probabilities.len() - 1)
 }
 
 #[inline]
@@ -1060,7 +1082,7 @@ fn sample_forward(
     transition_probabilities: &[f64],
     sampled: &mut [u8],
     rng: &mut LogicalRng,
-) {
+) -> Result<(), SampleError> {
     let mut probabilities = [0.0f64; 64];
     let mut previous_sampled = 0usize;
     let mut previous_count = 1usize;
@@ -1071,13 +1093,17 @@ fn sample_forward(
         let mut total = 0.0f64;
         for relative in 0..current_count {
             probabilities[relative] = transition_probabilities[start + relative];
+            if !probabilities[relative].is_finite() || probabilities[relative] < 0.0 {
+                return Err(SampleError::DegenerateDistribution);
+            }
             total += probabilities[relative];
         }
-        previous_sampled = sample_probabilities(&probabilities, total, rng);
+        previous_sampled = sample_probabilities(&probabilities[..current_count], total, rng)?;
         sampled[segment] = diplotype_code(diplotype, previous_sampled);
         transition_offset += previous_count * current_count;
         previous_count = current_count;
     }
+    Ok(())
 }
 
 fn sample_backward(
@@ -1086,7 +1112,7 @@ fn sample_backward(
     transitions: usize,
     sampled: &mut [u8],
     rng: &mut LogicalRng,
-) {
+) -> Result<(), SampleError> {
     let mut probabilities = [0.0f64; 64 * 64];
     let mut next_sampled = None;
     let mut next_count = diplotypes.last().unwrap().count_ones() as usize;
@@ -1099,9 +1125,13 @@ fn sample_backward(
             for relative in 0..current_count {
                 probabilities[relative] = transition_probabilities
                     [transition_offset + next_sampled_index + relative * next_count];
+                if !probabilities[relative].is_finite() || probabilities[relative] < 0.0 {
+                    return Err(SampleError::DegenerateDistribution);
+                }
                 total += probabilities[relative];
             }
-            let current_sampled = sample_probabilities(&probabilities[..64], total, rng);
+            let current_sampled =
+                sample_probabilities(&probabilities[..current_count], total, rng)?;
             sampled[segment] = diplotype_code(diplotypes[segment], current_sampled);
             next_sampled = Some(current_sampled);
         } else {
@@ -1109,9 +1139,12 @@ fn sample_backward(
             let mut total = 0.0f64;
             for relative in 0..block_length {
                 probabilities[relative] = transition_probabilities[transition_offset + relative];
+                if !probabilities[relative].is_finite() || probabilities[relative] < 0.0 {
+                    return Err(SampleError::DegenerateDistribution);
+                }
                 total += probabilities[relative];
             }
-            let joint_sampled = sample_probabilities(&probabilities, total, rng);
+            let joint_sampled = sample_probabilities(&probabilities[..block_length], total, rng)?;
             sampled[segment + 1] =
                 diplotype_code(diplotypes[segment + 1], joint_sampled % next_count);
             let current_sampled = joint_sampled / next_count;
@@ -1120,6 +1153,60 @@ fn sample_backward(
         }
         next_count = current_count;
     }
+    Ok(())
+}
+
+struct SampleParameters<'a> {
+    variants: &'a mut [u8],
+    ambiguous: &'a [u8],
+    diplotypes: &'a [u64],
+    segment_lengths: &'a [u16],
+    transition_probabilities: &'a [f64],
+    missing_probabilities: &'a [f32],
+    haploid: bool,
+}
+
+fn sample_validated(
+    parameters: SampleParameters<'_>,
+    seed: u64,
+    domain: u32,
+    iteration: u32,
+    item: u64,
+) -> Result<(), SampleError> {
+    let SampleParameters {
+        variants,
+        ambiguous,
+        diplotypes,
+        segment_lengths,
+        transition_probabilities,
+        missing_probabilities,
+        haploid,
+    } = parameters;
+    let mut rng = LogicalRng::new(seed, domain, iteration, item);
+    let mut sampled = vec![0u8; diplotypes.len()];
+    if rng.next_f64() < 0.5 {
+        sample_forward(diplotypes, transition_probabilities, &mut sampled, &mut rng)?;
+    } else {
+        sample_backward(
+            diplotypes,
+            transition_probabilities,
+            transition_probabilities.len(),
+            &mut sampled,
+            &mut rng,
+        )?;
+    }
+    apply_sample(
+        ApplySample {
+            variants,
+            ambiguous,
+            segment_lengths,
+            sampled: &sampled,
+            missing_probabilities,
+            haploid,
+        },
+        &mut rng,
+    );
+    Ok(())
 }
 
 #[inline]
@@ -2300,36 +2387,63 @@ pub unsafe extern "C" fn shapeit_genotype_sample_v1(
     };
     let missing_probabilities = &missing_probabilities[..layout.missing * 8];
 
-    let mut rng = LogicalRng::new(seed, domain, iteration, item);
-    let mut sampled = vec![0u8; diplotypes.len()];
-    if rng.next_f64() < 0.5 {
-        sample_forward(
-            diplotypes,
-            &transition_probabilities[..layout.transitions],
-            &mut sampled,
-            &mut rng,
-        );
-    } else {
-        sample_backward(
-            diplotypes,
-            &transition_probabilities[..layout.transitions],
-            layout.transitions,
-            &mut sampled,
-            &mut rng,
-        );
-    }
-    apply_sample(
-        ApplySample {
+    match sample_validated(
+        SampleParameters {
             variants,
             ambiguous,
+            diplotypes,
             segment_lengths,
-            sampled: &sampled,
+            transition_probabilities: &transition_probabilities[..layout.transitions],
             missing_probabilities,
             haploid: haploid != 0,
         },
-        &mut rng,
-    );
-    STATUS_OK
+        seed,
+        domain,
+        iteration,
+        item,
+    ) {
+        Ok(()) => STATUS_OK,
+        Err(error) => error.status(),
+    }
+}
+
+pub(crate) fn sample_graph_current(
+    graph: &mut GenotypeGraphV1,
+    transition_probabilities: &[f64],
+    missing_probabilities: &[f32],
+    seed: u64,
+    domain: u32,
+    iteration: u32,
+    item: u64,
+) -> Result<(), SampleError> {
+    if !graph.built {
+        return Err(SampleError::Status(STATUS_INVALID_DIMENSIONS));
+    }
+    let layout = validate_sample_layout(
+        &graph.variants,
+        graph.variant_count,
+        graph.ambiguous.len(),
+        &graph.diplotypes,
+        &graph.segment_lengths,
+        transition_probabilities.len(),
+        missing_probabilities.len(),
+    )
+    .map_err(SampleError::Status)?;
+    sample_validated(
+        SampleParameters {
+            variants: &mut graph.variants,
+            ambiguous: &graph.ambiguous,
+            diplotypes: &graph.diplotypes,
+            segment_lengths: &graph.segment_lengths,
+            transition_probabilities: &transition_probabilities[..layout.transitions],
+            missing_probabilities: &missing_probabilities[..layout.missing * 8],
+            haploid: graph.haploid,
+        },
+        seed,
+        domain,
+        iteration,
+        item,
+    )
 }
 
 #[no_mangle]
@@ -3631,6 +3745,40 @@ mod tests {
         };
         assert_eq!(status, STATUS_OK);
         assert_eq!(variants, [0xee]);
+    }
+
+    #[test]
+    fn forward_sampler_rejects_zero_mass_row_before_indexing_the_next_block() {
+        let diplotypes = [0b11u64; 3];
+        let transitions = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.25, 0.25, 0.25];
+        let mut sampled = [0xa5u8; 3];
+        let mut rng = LogicalRng::new(15_052_011, 3, 7, 11);
+
+        assert_eq!(
+            sample_forward(&diplotypes, &transitions, &mut sampled, &mut rng),
+            Err(SampleError::DegenerateDistribution)
+        );
+        assert_eq!(sampled[2], 0xa5);
+    }
+
+    #[test]
+    fn backward_sampler_rejects_zero_mass_conditional_row() {
+        let diplotypes = [0b11u64; 3];
+        let transitions = [0.5, 0.5, 0.0, 0.5, 0.0, 0.5, 0.5, 0.0, 0.5, 0.0];
+        let mut sampled = [0xa5u8; 3];
+        let mut rng = LogicalRng::new(15_052_011, 3, 7, 11);
+
+        assert_eq!(
+            sample_backward(
+                &diplotypes,
+                &transitions,
+                transitions.len(),
+                &mut sampled,
+                &mut rng,
+            ),
+            Err(SampleError::DegenerateDistribution)
+        );
+        assert_eq!(sampled[0], 0xa5);
     }
 
     #[test]
