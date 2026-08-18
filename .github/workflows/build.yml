@@ -1,0 +1,52 @@
+name: Clean Ubuntu build
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  phase-common:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.85.1
+        run: rustup toolchain install 1.85.1 --profile minimal
+
+      - name: Build Rust kernels
+        run: cargo +1.85.1 build --release
+        working-directory: rng
+
+      - name: Install C++ and HTSlib dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential curl \
+            libboost-iostreams-dev libboost-program-options-dev \
+            libboost-serialization-dev \
+            zlib1g-dev libbz2-dev liblzma-dev libcurl4-openssl-dev \
+            libssl-dev libdeflate-dev
+
+      - name: Build HTSlib 1.18
+        run: |
+          curl -fsSL \
+            https://github.com/samtools/htslib/releases/download/1.18/htslib-1.18.tar.bz2 \
+            -o "${RUNNER_TEMP}/htslib-1.18.tar.bz2"
+          tar -xjf "${RUNNER_TEMP}/htslib-1.18.tar.bz2" -C "${RUNNER_TEMP}"
+          cd "${RUNNER_TEMP}/htslib-1.18"
+          ./configure --disable-libcurl
+          make -j2 libhts.a
+
+      - name: Build static phase_common
+        run: |
+          make -C phase_common -j2 static_exe \
+            HTSSRC="${RUNNER_TEMP}" \
+            BOOST_LIB_IO=/usr/lib/x86_64-linux-gnu/libboost_iostreams.a \
+            BOOST_LIB_PO=/usr/lib/x86_64-linux-gnu/libboost_program_options.a \
+            BOOST_LIB_SE=/usr/lib/x86_64-linux-gnu/libboost_serialization.a

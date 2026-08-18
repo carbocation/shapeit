@@ -50,7 +50,8 @@ fn detect_avx512_full_kernel() -> bool {
     }
     // The paired-ZMM kernel loses on Cascade Lake but wins on measured
     // Sapphire Rapids (model 0x8f) and Emerald Rapids (model 0xcf).
-    let vendor = __cpuid(0);
+    // SAFETY: CPUID is available in every x86-64 execution environment.
+    let vendor = unsafe { __cpuid(0) };
     if [vendor.ebx, vendor.edx, vendor.ecx]
         != [
             u32::from_le_bytes(*b"Genu"),
@@ -60,7 +61,8 @@ fn detect_avx512_full_kernel() -> bool {
     {
         return false;
     }
-    let version = __cpuid(1);
+    // SAFETY: Basic CPUID leaf 1 is available on every x86-64 processor.
+    let version = unsafe { __cpuid(1) };
     intel_avx512_full_model_allowed(version.eax)
 }
 
@@ -1242,7 +1244,9 @@ impl SingleEngine<'_> {
 
     #[cfg(target_arch = "x86_64")]
     #[inline(never)]
-    #[target_feature(enable = "avx2,fma,avx512f")]
+    // ZMM and opmask instructions are confined to inline assembly. Runtime
+    // dispatch guards them; stable Rust only names the AVX2/FMA intrinsics.
+    #[target_feature(enable = "avx2,fma")]
     unsafe fn run_full_hom_blocks_avx512(
         probability: *mut f32,
         allele_bytes: *const u8,
@@ -1402,7 +1406,9 @@ impl SingleEngine<'_> {
 
     #[cfg(target_arch = "x86_64")]
     #[inline(never)]
-    #[target_feature(enable = "avx2,fma,avx512f")]
+    // See run_full_hom_blocks_avx512: the avx512f target feature remains
+    // intentionally absent because it is unstable on supported Rust releases.
+    #[target_feature(enable = "avx2,fma")]
     unsafe fn run_full_ambiguous_blocks_avx512(
         probability: *mut f32,
         allele_bytes: *const u8,

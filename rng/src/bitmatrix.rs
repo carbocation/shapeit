@@ -243,7 +243,9 @@ fn bmi2_available() -> bool {
 
     // CPUID is available on every x86_64 processor. Leaf 7 is queried only
     // when the maximum supported basic leaf includes it.
-    __cpuid(0).eax >= 7 && (__cpuid_count(7, 0).ebx & (1 << 8)) != 0
+    // SAFETY: CPUID is available on x86-64, and leaf 7 is queried only after
+    // the maximum supported basic leaf has been checked.
+    unsafe { __cpuid(0).eax >= 7 && (__cpuid_count(7, 0).ebx & (1 << 8)) != 0 }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -397,7 +399,8 @@ fn het_overlap_portable(source: &[u8], layout: HetOverlapLayout) -> f32 {
 fn popcnt_available() -> bool {
     use core::arch::x86_64::__cpuid;
 
-    (__cpuid(1).ecx & (1 << 23)) != 0
+    // SAFETY: Basic CPUID leaf 1 is available on every x86-64 processor.
+    unsafe { (__cpuid(1).ecx & (1 << 23)) != 0 }
 }
 
 #[cfg(target_arch = "x86_64")]

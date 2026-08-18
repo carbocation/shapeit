@@ -25,6 +25,7 @@
 
 #include <utils/otools.h>
 #include <shapeit_genotype.h>
+#include <span>
 
 //Macros for packing/unpacking variants
 #define VAR_GET_HOM(e,v)	((((v)>>((e)<<2))&3)==0)
