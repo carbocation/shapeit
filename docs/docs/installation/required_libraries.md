@@ -23,6 +23,24 @@ SHAPEIT5 requires several libraries installed on the system. Here we assume most
 - HTSlib version >= 1.7: A C library for reading/writing high-throughput sequencing data.
 - BOOST version >= 1.65: A set of peer-reviewed portable C++ source libraries. SHAPEIT5 uses two specific BOOST libraries: `iostreams` and `program_options`.
 
+### macOS with Homebrew
+
+The native Apple Silicon build automatically discovers libraries installed by
+[Homebrew](https://brew.sh/) under its arm64 prefix. Install the required
+packages with:
+
+<div class="code-example" markdown="1">
+```bash
+brew install boost htslib
+```
+</div>
+
+Homebrew installs HTSlib's compression dependencies as well. The resulting
+SHAPEIT5 executables are dynamically linked to these Homebrew libraries, so
+keep the packages installed while using the executables. This is a native
+arm64 build and does not require an Intel Homebrew installation under
+`/usr/local`.
+
 ### HTSlib
 Building HTSlib is straightforward and does not require root privileges. Please refer to the [HTSlib](http://www.htslib.org/) documentation for complete details. Here we provide a basic script to install HTSlib v1.16:
 
@@ -75,4 +93,6 @@ locate -b '\libcurl.so'
 ```
 </div>
 
-
+The `locate` checks above apply to Linux source installations. On macOS,
+`brew --prefix htslib` and `brew --prefix boost` show the prefixes selected by
+the native build.

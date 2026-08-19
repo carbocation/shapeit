@@ -50,3 +50,100 @@ jobs:
             BOOST_LIB_IO=/usr/lib/x86_64-linux-gnu/libboost_iostreams.a \
             BOOST_LIB_PO=/usr/lib/x86_64-linux-gnu/libboost_program_options.a \
             BOOST_LIB_SE=/usr/lib/x86_64-linux-gnu/libboost_serialization.a
+
+      - name: Build static phase_rare
+        run: |
+          make -C phase_rare -j2 static_exe \
+            HTSSRC="${RUNNER_TEMP}" \
+            BOOST_LIB_IO=/usr/lib/x86_64-linux-gnu/libboost_iostreams.a \
+            BOOST_LIB_PO=/usr/lib/x86_64-linux-gnu/libboost_program_options.a \
+            BOOST_LIB_SE=/usr/lib/x86_64-linux-gnu/libboost_serialization.a
+
+      - name: Test the phase_rare vector abstraction
+        run: make -C phase_rare vector-test
+
+  macos-arm64:
+    name: Native macOS arm64 suite
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      NATIVE_BIN_DIR: ${{ runner.temp }}/shapeit5-macos-arm64-bin
+      RUSTUP_TOOLCHAIN: 1.85.1
+      SHAPEIT5_BENCHMARK_TMP: ${{ runner.temp }}/shapeit5-benchmarks
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Require an Apple Silicon runner
+        run: |
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+
+      - name: Install Rust 1.85.1
+        run: rustup toolchain install 1.85.1 --profile minimal
+
+      - name: Install native dependencies
+        run: brew install boost htslib
+
+      - name: Build the native suite
+        run: make -j3 macos-arm64
+
+      - name: Verify and smoke-test native executables
+        shell: bash
+        run: |
+          executables=(
+            phase_common/bin/macos-arm64/phase_common
+            phase_rare/bin/macos-arm64/phase_rare
+            switch/bin/macos-arm64/switch
+            ligate/bin/macos-arm64/ligate
+            simulate/bin/macos-arm64/simulate
+            xcftools/bin/macos-arm64/xcftools
+          )
+          mkdir -p "$NATIVE_BIN_DIR"
+          for executable in "${executables[@]}"; do
+            test -x "$executable"
+            file "$executable" | grep -q 'Mach-O 64-bit executable arm64'
+            ln -s "$GITHUB_WORKSPACE/$executable" "$NATIVE_BIN_DIR/$(basename "$executable")"
+          done
+
+          expected_commit=$(git rev-parse --short HEAD)
+          check_commit() {
+            local output
+            output=$("$@" 2>&1)
+            grep -Fq "commit = $expected_commit" <<<"$output"
+          }
+          check_commit "$NATIVE_BIN_DIR/phase_common" --help
+          check_commit "$NATIVE_BIN_DIR/phase_rare" --help
+          check_commit "$NATIVE_BIN_DIR/ligate" --help
+          check_commit "$NATIVE_BIN_DIR/xcftools"
+
+          "$NATIVE_BIN_DIR/switch" --help >/dev/null
+          "$NATIVE_BIN_DIR/simulate" family --help >/dev/null
+          "$NATIVE_BIN_DIR/simulate" haploid --help >/dev/null
+
+          switch_output=$("$NATIVE_BIN_DIR/switch" 2>&1 || true)
+          grep -Fq "commit = $expected_commit" <<<"$switch_output"
+
+      - name: Run Rust and C++ ABI tests
+        run: |
+          make rng-test
+          make -C phase_rare vector-test
+
+      - name: Run benchmark unit tests
+        run: make benchmark-unit
+
+      - name: Run deterministic phasing regressions
+        run: |
+          python3 test/benchmarks/run.py --bin-dir "$NATIVE_BIN_DIR"
+          python3 test/benchmarks/thread_determinism.py --bin-dir "$NATIVE_BIN_DIR"
+          python3 test/benchmarks/edge_regressions.py --bin-dir "$NATIVE_BIN_DIR"
+
+      - name: Upload regression logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-regression-logs
+          path: ${{ env.SHAPEIT5_BENCHMARK_TMP }}
+          if-no-files-found: ignore
