@@ -29,20 +29,6 @@
 #include <objects/hmm_parameters.h>
 #include <containers/state_set.h>
 
-#include <immintrin.h>
-
-inline
-float horizontal_add (const __m256& a) {
-	__m128 vlow = _mm256_castps256_ps128(a);
-	__m128 vhigh = _mm256_extractf128_ps(a, 1); // high 128
-	vlow = _mm_add_ps(vlow, vhigh);     // add the low 128
-	__m128 shuf = _mm_movehdup_ps(vlow);        // broadcast elements 3,1 to 2,0
-	__m128 sums = _mm_add_ps(vlow, shuf);
-	shuf = _mm_movehl_ps(shuf, sums); // high half -> low half
-	sums = _mm_add_ss(sums, shuf);    // (no wasted instructions, and all of them are the 4B minimum)
-	return _mm_cvtss_f32(sums);
-}
-
 class hmm_scaffold {
 public:
 	//DATA
@@ -77,7 +63,6 @@ public:
 };
 
 #endif
-
 
 
 

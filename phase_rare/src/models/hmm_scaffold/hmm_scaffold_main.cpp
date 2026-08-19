@@ -21,8 +21,10 @@
  ******************************************************************************/
 
 #include <models/hmm_scaffold/hmm_scaffold_header.h>
+#include <models/hmm_scaffold/hmm_scaffold_vector.h>
 
 using namespace std;
+namespace hsv = hmm_scaffold_vector;
 
 hmm_scaffold::hmm_scaffold(variant_map & _V, genotype_set & _G, conditioning_set & _C, hmm_parameters & _M) : V(_V), G(_G), C(_C), M(_M){
 	match_prob[0] = 1.0f; match_prob[1] = M.ed/M.ee;
@@ -54,27 +56,25 @@ void hmm_scaffold::setup(uint32_t _hap) {
 double hmm_scaffold::forward() {
 	float sum;
 	double loglik = 0.0;
-	const uint32_t nstatesMD8 = (nstates / 8) * 8;
-	const __m256i _vshift_count = _mm256_set_epi32(31,30,29,28,27,26,25,24);
+	const uint32_t nstates_vectorized = (nstates / hsv::width) * hsv::width;
 	for (int32_t vs = 0 ; vs < C.n_scaffold_variants ; vs ++) {
 		const std::array<float,2> emit = {match_prob[C.Hhap.get(hap, vs)], match_prob[1-C.Hhap.get(hap, vs)]};
-		const __m256 _emit0 = _mm256_set1_ps(emit[0]);
-		const __m256 _emit1 = _mm256_set1_ps(emit[1]);
+		const hsv::float8 _emit0 = hsv::broadcast(emit[0]);
+		const hsv::float8 _emit1 = hsv::broadcast(emit[1]);
 
 		if (!vs) {
 			const float f0 = 1.0f / nstates;
-			const __m256 _f0 = _mm256_set1_ps(f0);
-			__m256 _sum = _mm256_set1_ps(0.0f);
+			const hsv::float8 _f0 = hsv::broadcast(f0);
+			hsv::float8 _sum = hsv::broadcast(0.0f);
 			int32_t offset = 0;
-			for (int32_t k = 0 ; k < nstatesMD8 ; k += 8) {
-				const __m256i _mask = _mm256_sllv_epi32(_mm256_set1_epi32((uint32_t )Hvar.getByte(vs, k)), _vshift_count);
-				const __m256 _emiss = _mm256_blendv_ps (_emit0, _emit1, _mm256_castsi256_ps(_mask));
-				const __m256 _prob_curr = _mm256_mul_ps(_emiss, _f0);
-				_sum = _mm256_add_ps(_sum, _prob_curr);
-				_mm256_store_ps(&alpha[vs][k], _prob_curr);
-				offset += 8;
+			for (int32_t k = 0 ; k < nstates_vectorized ; k += hsv::width) {
+				const hsv::float8 _emiss = hsv::select_packed_byte(Hvar.getByte(vs, k), _emit0, _emit1);
+				const hsv::float8 _prob_curr = hsv::multiply(_emiss, _f0);
+				_sum = hsv::add(_sum, _prob_curr);
+				hsv::store_aligned(&alpha[vs][k], _prob_curr);
+				offset += hsv::width;
 			}
-			sum = (offset > 0)?horizontal_add(_sum):0.0f;
+			sum = (offset > 0)?hsv::horizontal_add(_sum):0.0f;
 			for (; offset < nstates ; offset ++) {
 				alpha[vs][offset] = f0 * emit[Hvar.get(vs, offset)];
 				sum += alpha[vs][offset];
@@ -83,21 +83,20 @@ double hmm_scaffold::forward() {
 		} else {
 			const float f0 = M.t[vs-1] / nstates;
 			const float f1 = M.nt[vs-1] / sum;
-			const __m256 _f0 = _mm256_set1_ps(f0);
-			const __m256 _f1 = _mm256_set1_ps(f1);
-			__m256 _sum = _mm256_set1_ps(0.0f);
+			const hsv::float8 _f0 = hsv::broadcast(f0);
+			const hsv::float8 _f1 = hsv::broadcast(f1);
+			hsv::float8 _sum = hsv::broadcast(0.0f);
 			int32_t offset = 0;
-			for (int32_t k = 0 ; k < nstatesMD8 ; k += 8) {
-				const __m256i _mask = _mm256_sllv_epi32(_mm256_set1_epi32((uint32_t )Hvar.getByte(vs, k)), _vshift_count);
-				const __m256 _emiss = _mm256_blendv_ps (_emit0, _emit1, _mm256_castsi256_ps(_mask));
-				const __m256 _prob_prev = _mm256_load_ps(&alpha[vs-1][k]);
-				const __m256 _prob_temp = _mm256_fmadd_ps(_prob_prev, _f1, _f0);
-				const __m256 _prob_curr = _mm256_mul_ps(_prob_temp, _emiss);
-				_sum = _mm256_add_ps(_sum, _prob_curr);
-				_mm256_store_ps(&alpha[vs][k], _prob_curr);
-				offset += 8;
+			for (int32_t k = 0 ; k < nstates_vectorized ; k += hsv::width) {
+				const hsv::float8 _emiss = hsv::select_packed_byte(Hvar.getByte(vs, k), _emit0, _emit1);
+				const hsv::float8 _prob_prev = hsv::load_aligned(&alpha[vs-1][k]);
+				const hsv::float8 _prob_temp = hsv::multiply_add(_prob_prev, _f1, _f0);
+				const hsv::float8 _prob_curr = hsv::multiply(_prob_temp, _emiss);
+				_sum = hsv::add(_sum, _prob_curr);
+				hsv::store_aligned(&alpha[vs][k], _prob_curr);
+				offset += hsv::width;
 			}
-			sum = (offset > 0)?horizontal_add(_sum):0.0f;
+			sum = (offset > 0)?hsv::horizontal_add(_sum):0.0f;
 			for (; offset < nstates ; offset ++) {
 				alpha[vs][offset] = (alpha[vs-1][offset]*f1+f0)*emit[Hvar.get(vs, offset)];
 				sum += alpha[vs][offset];
@@ -110,8 +109,7 @@ double hmm_scaffold::forward() {
 
 void hmm_scaffold::backward(vector < vector < uint32_t > > & cevents, vector < int32_t > & vpath) {
 	float sum = 0.0f, scale = 0.0f;
-	const uint32_t nstatesMD8 = (nstates / 8) * 8;
-	const __m256i _vshift_count = _mm256_set_epi32(31,30,29,28,27,26,25,24);
+	const uint32_t nstates_vectorized = (nstates / hsv::width) * hsv::width;
 	aligned_vector32 < float > alphaXbeta_curr = aligned_vector32 < float >(nstates, 0.0f);
 	aligned_vector32 < float > alphaXbeta_prev = aligned_vector32 < float >(nstates, 0.0f);
 
@@ -121,63 +119,62 @@ void hmm_scaffold::backward(vector < vector < uint32_t > > & cevents, vector < i
 
 		//
 		const std::array<float,2> emit = {match_prob[C.Hhap.get(hap, vs)], match_prob[1-C.Hhap.get(hap, vs)]};
-		const __m256 _emit0 = _mm256_set1_ps(emit[0]);
-		const __m256 _emit1 = _mm256_set1_ps(emit[1]);
+		const hsv::float8 _emit0 = hsv::broadcast(emit[0]);
+		const hsv::float8 _emit1 = hsv::broadcast(emit[1]);
 
 		//Transitions
 		if (vs == C.n_scaffold_variants - 1) fill (beta.begin(), beta.end(), 1.0f / nstates);
 		else {
 			const float f0 = M.t[vs] / nstates;
 			const float f1 = M.nt[vs] / sum;
-			const __m256 _f0 = _mm256_set1_ps(f0);
-			const __m256 _f1 = _mm256_set1_ps(f1);
+			const hsv::float8 _f0 = hsv::broadcast(f0);
+			const hsv::float8 _f1 = hsv::broadcast(f1);
 			int32_t offset = 0;
-			for (int32_t k = 0 ; k < nstatesMD8 ; k += 8) {
-				const __m256 _prob_prev = _mm256_load_ps(&beta[k]);
-				const __m256 _prob_curr = _mm256_fmadd_ps(_prob_prev, _f1, _f0);
-				_mm256_store_ps(&beta[k], _prob_curr);
-				offset += 8;
+			for (int32_t k = 0 ; k < nstates_vectorized ; k += hsv::width) {
+				const hsv::float8 _prob_prev = hsv::load_aligned(&beta[k]);
+				const hsv::float8 _prob_curr = hsv::multiply_add(_prob_prev, _f1, _f0);
+				hsv::store_aligned(&beta[k], _prob_curr);
+				offset += hsv::width;
 			}
 			for (; offset < nstates ; offset ++) beta[offset] = (beta[offset]*f1+f0);
 		}
 
 		//Products
-		__m256 _scale = _mm256_set1_ps(0.0f);
+		hsv::float8 _scale = hsv::broadcast(0.0f);
 		int32_t offset = 0;
-		for (int32_t k = 0 ; k < nstatesMD8 ; k += 8) {
-			const __m256 _prob_temp = _mm256_mul_ps(_mm256_load_ps(&alpha[vs][k]), _mm256_load_ps(&beta[k]));
-			_mm256_store_ps(&alphaXbeta_curr[k], _prob_temp);
-			_scale = _mm256_add_ps(_scale, _prob_temp);
-			offset += 8;
+		for (int32_t k = 0 ; k < nstates_vectorized ; k += hsv::width) {
+			const hsv::float8 _prob_temp = hsv::multiply(hsv::load_aligned(&alpha[vs][k]), hsv::load_aligned(&beta[k]));
+			hsv::store_aligned(&alphaXbeta_curr[k], _prob_temp);
+			_scale = hsv::add(_scale, _prob_temp);
+			offset += hsv::width;
 		}
-		scale = (offset > 0)?horizontal_add(_scale):0.0f;
+		scale = (offset > 0)?hsv::horizontal_add(_scale):0.0f;
 		for (; offset < nstates ; offset ++) {
 			alphaXbeta_curr[offset] = alpha[vs][offset] * beta[offset];
 			scale += alphaXbeta_curr[offset];
 		}
 		scale = 1.0f / scale;
-		_scale = _mm256_set1_ps(scale);
+		_scale = hsv::broadcast(scale);
 		offset = 0;
-		for (int32_t k = 0 ; k < nstatesMD8 ; k += 8) {
-			const __m256 _prob_temp = _mm256_mul_ps(_mm256_load_ps(&alphaXbeta_curr[k]), _scale);
-			_mm256_store_ps(&alphaXbeta_curr[k], _prob_temp);
-			offset += 8;
+		for (int32_t k = 0 ; k < nstates_vectorized ; k += hsv::width) {
+			const hsv::float8 _prob_temp = hsv::multiply(hsv::load_aligned(&alphaXbeta_curr[k]), _scale);
+			hsv::store_aligned(&alphaXbeta_curr[k], _prob_temp);
+			offset += hsv::width;
 		}
 		for (; offset < nstates ; offset ++) alphaXbeta_curr[offset] *= scale;
 
 		//Emission
-		__m256 _sum = _mm256_set1_ps(0.0f);
+		hsv::float8 _sum = hsv::broadcast(0.0f);
 		offset = 0;
-		for (int32_t k = 0 ; k < nstatesMD8 ; k += 8) {
-			const __m256i _mask = _mm256_sllv_epi32(_mm256_set1_epi32((uint32_t )Hvar.getByte(vs, k)), _vshift_count);
-			const __m256 _emiss = _mm256_blendv_ps (_emit0, _emit1, _mm256_castsi256_ps(_mask));
-			const __m256 _prob_prev = _mm256_load_ps(&beta[k]);
-			const __m256 _prob_curr = _mm256_mul_ps(_prob_prev, _emiss);
-			_sum = _mm256_add_ps(_sum, _prob_curr);
-			_mm256_store_ps(&beta[k], _prob_curr);
-			offset += 8;
+		for (int32_t k = 0 ; k < nstates_vectorized ; k += hsv::width) {
+			const hsv::float8 _emiss = hsv::select_packed_byte(Hvar.getByte(vs, k), _emit0, _emit1);
+			const hsv::float8 _prob_prev = hsv::load_aligned(&beta[k]);
+			const hsv::float8 _prob_curr = hsv::multiply(_prob_prev, _emiss);
+			_sum = hsv::add(_sum, _prob_curr);
+			hsv::store_aligned(&beta[k], _prob_curr);
+			offset += hsv::width;
 		}
-		sum = (offset > 0)?horizontal_add(_sum):0.0f;
+		sum = (offset > 0)?hsv::horizontal_add(_sum):0.0f;
 		for (; offset < nstates ; offset ++) {
 			beta[offset] *= emit[Hvar.get(vs, offset)];
 			sum += beta[offset];
