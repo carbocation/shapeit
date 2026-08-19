@@ -27,6 +27,7 @@ using namespace std;
 void genotype_set::phaseLiAndStephens(uint32_t vr, uint32_t hap, aligned_vector32 < float > & alphaXbeta_prev, aligned_vector32 < float > & alphaXbeta_curr, vector < uint32_t > & H, float threshold) {
 	float p[2] = { 0.0f };
 	float total_weight = 0.0f;
+	uint32_t called_comparison_count = 0;
 
 	thread_local vector < uint32_t > carrier_epoch;
 	thread_local vector < uint8_t > carrier_state;
@@ -57,10 +58,13 @@ void genotype_set::phaseLiAndStephens(uint32_t vr, uint32_t hap, aligned_vector3
 			vrb.error("Invalid Li-Stephens conditioning weight at rare variant " + stb.str(vr));
 		total_weight += weight;
 		const uint32_t individual = H[k] >> 1;
-		if (carrier_epoch[individual] != current_epoch)
+		if (carrier_epoch[individual] != current_epoch) {
+			called_comparison_count ++;
 			p[major_alleles[vr]] += weight;
-		else if (carrier_state[individual] == 1)
+		} else if (carrier_state[individual] == 1) {
+			called_comparison_count ++;
 			p[!major_alleles[vr]] += weight;
+		}
 	}
 
 	assert(tidx>=0);
@@ -69,11 +73,13 @@ void genotype_set::phaseLiAndStephens(uint32_t vr, uint32_t hap, aligned_vector3
 	const float conditioning_mass = p[0] + p[1];
 	if (!isfinite(conditioning_mass) || conditioning_mass < 0.0f)
 		vrb.error("Invalid Li-Stephens conditioning mass at rare variant " + stb.str(vr));
-	// The selected states provide no allele evidence when all their genotypes
-	// are missing. Mark the site for whole-record omission rather than inventing
-	// haplotypes from data outside the configured conditioning set.
 	rare_genotype & target = GRvar_genotypes[vr][tidx];
-	if (conditioning_mass == 0.0f) {
+	// Omit only the diagnosed structural case: every selected comparison
+	// genotype is missing. A zero mass despite called comparisons is a numerical
+	// failure, not grounds for changing the output variant set.
+	if (called_comparison_count == 0) {
+		if (conditioning_mass != 0.0f)
+			vrb.error("Nonzero Li-Stephens conditioning mass without called comparisons at rare variant " + stb.str(vr));
 		target.markNoHmmEvidence();
 		bool marked = false;
 		for (rare_genotype & genotype : GRind_genotypes[target.idx]) {
@@ -86,6 +92,8 @@ void genotype_set::phaseLiAndStephens(uint32_t vr, uint32_t hap, aligned_vector3
 		assert(marked);
 		return;
 	}
+	if (conditioning_mass == 0.0f)
+		vrb.error("Zero Li-Stephens conditioning mass with called comparisons at rare variant " + stb.str(vr));
 	// If the other target haplotype had no evidence, avoid a partial update; the
 	// whole site will be omitted after all workers finish.
 	if (target.hasNoHmmEvidence()) return;

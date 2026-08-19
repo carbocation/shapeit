@@ -92,6 +92,7 @@ void haplotype_writer::writeHaplotypesVCF(std::string foutput, std::string finpu
 	//Add records
 	int32_t * genotypes = (int32_t*)malloc(bcf_hdr_nsamples(hdr)*2*sizeof(int32_t));
 	float * probabilities = (float*)malloc(bcf_hdr_nsamples(hdr)*1*sizeof(float));
+	uint32_t n_written = 0;
 
 	for (int32_t vt = 0, vs = 0, vr = 0 ; vt < V.sizeFull() ; vt ++) {
 
@@ -146,6 +147,7 @@ void haplotype_writer::writeHaplotypesVCF(std::string foutput, std::string finpu
 			if (addPP && V.vec_full[vt]->type == VARTYPE_RARE) bcf_update_format_float(hdr, rec, "PP", probabilities, bcf_hdr_nsamples(hdr)*1);
 
 			if (bcf_write1(fp, hdr, rec) < 0) vrb.error("Failing to write VCF/record");
+			n_written ++;
 		}
 
 		switch (V.vec_full[vt]->type) {
@@ -161,9 +163,9 @@ void haplotype_writer::writeHaplotypesVCF(std::string foutput, std::string finpu
 	bcf_hdr_destroy(hdr);
 	if (hts_close(fp)) vrb.error("Non zero status when closing VCF/BCF file descriptor");
 	switch (file_type) {
-	case OFILE_VCFU: vrb.bullet("VCF writing [Uncompressed / N=" + stb.str(G.n_samples) + " / L=" + stb.str(V.sizeFull()) + "] (" + stb.str(tac.rel_time()*0.001, 2) + "s)"); break;
-	case OFILE_VCFC: vrb.bullet("VCF writing [Compressed / N=" + stb.str(G.n_samples) + " / L=" + stb.str(V.sizeFull()) + "] (" + stb.str(tac.rel_time()*0.001, 2) + "s)"); break;
-	case OFILE_BCFC: vrb.bullet("BCF writing [Compressed / N=" + stb.str(G.n_samples) + " / L=" + stb.str(V.sizeFull()) + "] (" + stb.str(tac.rel_time()*0.001, 2) + "s)"); break;
+	case OFILE_VCFU: vrb.bullet("VCF writing [Uncompressed / N=" + stb.str(G.n_samples) + " / L=" + stb.str(n_written) + "] (" + stb.str(tac.rel_time()*0.001, 2) + "s)"); break;
+	case OFILE_VCFC: vrb.bullet("VCF writing [Compressed / N=" + stb.str(G.n_samples) + " / L=" + stb.str(n_written) + "] (" + stb.str(tac.rel_time()*0.001, 2) + "s)"); break;
+	case OFILE_BCFC: vrb.bullet("BCF writing [Compressed / N=" + stb.str(G.n_samples) + " / L=" + stb.str(n_written) + "] (" + stb.str(tac.rel_time()*0.001, 2) + "s)"); break;
 	}
 
 	if (file_type != OFILE_VCFU) {
@@ -194,6 +196,7 @@ void haplotype_writer::writeHaplotypesXCF(std::string foutput, std::string finpu
 
 	//Write records
 	uint32_t count_alt = 0, count_tot = 0, n_sparse = 0;
+	uint32_t n_written = 0;
 	for (int32_t vt = 0, vs = 0, vr = 0 ; vt < V.sizeFull() ; vt ++) {
 		const bool rejected = V.vec_full[vt]->type == VARTYPE_RARE && G.rejected_rare_sites[vr];
 		if (V.vec_full[vt]->bp >= input_start && V.vec_full[vt]->bp <= input_stop && !rejected) {
@@ -245,6 +248,7 @@ void haplotype_writer::writeHaplotypesXCF(std::string foutput, std::string finpu
 				if (fformat == "pp") XW.writeRecord(RECORD_SPARSE_PHASEPROBS, reinterpret_cast<char*>(output_buffer), n_sparse * sizeof(int32_t));
 				if (fformat == "sh") XW.writeRecord(RECORD_SPARSE_HAPLOTYPE, reinterpret_cast<char*>(output_buffer), n_sparse * sizeof(int32_t));
 			} else XW.writeRecord(RECORD_BINARY_HAPLOTYPE, reinterpret_cast<char*>(output_bitvector.bytes), output_bitvector.n_bytes);
+			n_written ++;
 		}
 
 		//
@@ -262,7 +266,7 @@ void haplotype_writer::writeHaplotypesXCF(std::string foutput, std::string finpu
 	XW.close();
 
 	//Verbose writing
-	vrb.bullet("XCF writing [N=" + stb.str(G.n_samples) + " / L=" + stb.str(V.sizeFull()) + "] (" + stb.str(tac.rel_time()*0.001, 2) + "s)");
+	vrb.bullet("XCF writing [N=" + stb.str(G.n_samples) + " / L=" + stb.str(n_written) + "] (" + stb.str(tac.rel_time()*0.001, 2) + "s)");
 
 	//Indexing
 	vrb.bullet("Indexing files");
