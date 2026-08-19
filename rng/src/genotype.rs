@@ -469,14 +469,16 @@ struct PruneStatistic {
     mergeable: bool,
 }
 
-fn collect_diplotypes(mask: u64) -> Vec<u8> {
-    let mut codes = Vec::with_capacity(mask.count_ones() as usize);
+#[inline]
+fn collect_diplotypes(mask: u64, codes: &mut [u8; 64]) -> usize {
     let mut active = mask;
+    let mut count = 0usize;
     while active != 0 {
-        codes.push(active.trailing_zeros() as u8);
+        codes[count] = active.trailing_zeros() as u8;
+        count += 1;
         active &= active - 1;
     }
-    codes
+    count
 }
 
 fn rank_transitions(probabilities: &[f64], order: &mut Vec<usize>) {
@@ -498,13 +500,17 @@ fn map_prune_merges(
 ) -> Vec<bool> {
     let mut statistics = Vec::with_capacity(diplotypes.len().saturating_sub(1));
     let mut transition_order = Vec::with_capacity(4096);
-    let mut previous_diplotypes = collect_diplotypes(diplotypes[0]);
-    let mut transition_offset = previous_diplotypes.len();
+    let mut previous_diplotype_storage = [0u8; 64];
+    let mut current_diplotype_storage = [0u8; 64];
+    let mut previous_diplotypes = &mut previous_diplotype_storage;
+    let mut current_diplotypes = &mut current_diplotype_storage;
+    let mut previous_diplotype_count = collect_diplotypes(diplotypes[0], previous_diplotypes);
+    let mut transition_offset = previous_diplotype_count;
     let mut locus_offset = 0usize;
 
     for segment in 1..diplotypes.len() {
-        let current_diplotypes = collect_diplotypes(diplotypes[segment]);
-        let transition_count = previous_diplotypes.len() * current_diplotypes.len();
+        let current_diplotype_count = collect_diplotypes(diplotypes[segment], current_diplotypes);
+        let transition_count = previous_diplotype_count * current_diplotype_count;
         let mut statistic = PruneStatistic {
             entropy: 4096.0,
             segment,
@@ -536,8 +542,8 @@ fn map_prune_merges(
                 for &index in &transition_order {
                     cumulative_probability += probabilities[index];
                     let previous =
-                        usize::from(previous_diplotypes[index / current_diplotypes.len()]);
-                    let current = usize::from(current_diplotypes[index % current_diplotypes.len()]);
+                        usize::from(previous_diplotypes[index / current_diplotype_count]);
+                    let current = usize::from(current_diplotypes[index % current_diplotype_count]);
                     let merged_haplotype0 = (previous >> 3) * 8 + (current >> 3);
                     let merged_haplotype1 = (previous & 7) * 8 + (current & 7);
                     if mapped_haplotypes[merged_haplotype0] < 0 {
@@ -559,7 +565,8 @@ fn map_prune_merges(
         statistics.push(statistic);
         locus_offset += usize::from(segment_lengths[segment - 1]);
         transition_offset += transition_count;
-        previous_diplotypes = current_diplotypes;
+        core::mem::swap(&mut previous_diplotypes, &mut current_diplotypes);
+        previous_diplotype_count = current_diplotype_count;
     }
 
     statistics.sort_unstable_by(|first, second| {
@@ -635,14 +642,18 @@ fn prune_graph(
     let mut output_diplotypes = Vec::with_capacity(diplotypes.len() - merge_count);
     let mut output_segment_lengths = Vec::with_capacity(diplotypes.len() - merge_count);
     let mut transition_order = Vec::with_capacity(4096);
-    let mut previous_diplotypes = collect_diplotypes(diplotypes[0]);
-    let mut transition_offset = previous_diplotypes.len();
+    let mut previous_diplotype_storage = [0u8; 64];
+    let mut current_diplotype_storage = [0u8; 64];
+    let mut previous_diplotypes = &mut previous_diplotype_storage;
+    let mut current_diplotypes = &mut current_diplotype_storage;
+    let mut previous_diplotype_count = collect_diplotypes(diplotypes[0], previous_diplotypes);
+    let mut transition_offset = previous_diplotype_count;
     let mut ambiguous_offset = 0usize;
     let mut locus_offset = 0usize;
 
     for segment in 1..diplotypes.len() {
-        let current_diplotypes = collect_diplotypes(diplotypes[segment]);
-        let transition_count = previous_diplotypes.len() * current_diplotypes.len();
+        let current_diplotype_count = collect_diplotypes(diplotypes[segment], current_diplotypes);
+        let transition_count = previous_diplotype_count * current_diplotype_count;
         if merge_flags[segment] {
             let previous_length = usize::from(segment_lengths[segment - 1]);
             let merged_length = previous_length + usize::from(segment_lengths[segment]);
@@ -654,8 +665,8 @@ fn prune_graph(
             let mut haplotype_count = 0usize;
             let mut output_mask = 0u64;
             for &index in &transition_order {
-                let previous = usize::from(previous_diplotypes[index / current_diplotypes.len()]);
-                let current = usize::from(current_diplotypes[index % current_diplotypes.len()]);
+                let previous = usize::from(previous_diplotypes[index / current_diplotype_count]);
+                let current = usize::from(current_diplotypes[index % current_diplotype_count]);
                 let previous_haplotype0 = previous >> 3;
                 let previous_haplotype1 = previous & 7;
                 let current_haplotype0 = current >> 3;
@@ -748,7 +759,8 @@ fn prune_graph(
             .count();
         locus_offset += previous_length;
         transition_offset += transition_count;
-        previous_diplotypes = current_diplotypes;
+        core::mem::swap(&mut previous_diplotypes, &mut current_diplotypes);
+        previous_diplotype_count = current_diplotype_count;
     }
 
     if !merge_flags[diplotypes.len() - 1] {
@@ -3447,6 +3459,42 @@ mod tests {
         assert_eq!(status, STATUS_OK);
         assert_eq!(variants, pack(&[3, 3, 0, 1]));
         assert_eq!(reset_count, 2);
+    }
+
+    #[test]
+    fn diplotype_collection_preserves_trailing_zero_order() {
+        let mut codes = [u8::MAX; 64];
+        assert_eq!(collect_diplotypes(0, &mut codes), 0);
+
+        let count = collect_diplotypes((1u64 << 63) | (1u64 << 17) | 1, &mut codes);
+        assert_eq!(count, 3);
+        assert_eq!(&codes[..count], &[0, 17, 63]);
+
+        let count = collect_diplotypes(u64::MAX, &mut codes);
+        assert_eq!(count, 64);
+        assert_eq!(codes, core::array::from_fn(|index| index as u8));
+    }
+
+    #[test]
+    fn pruning_reuses_full_diplotype_buffers_across_segments() {
+        let variants = pack(&[0, 0, 0]);
+        let diplotypes = [u64::MAX, 1 | (1u64 << 63), 1u64 << 17];
+        let segment_lengths = [1u16; 3];
+        let transition_probabilities = [0.0f64; 194];
+        let pruned = prune_graph(
+            &variants,
+            &[],
+            &diplotypes,
+            &segment_lengths,
+            &transition_probabilities,
+            1.0,
+        )
+        .unwrap();
+
+        assert_eq!(pruned.ambiguous, []);
+        assert_eq!(pruned.diplotypes, diplotypes);
+        assert_eq!(pruned.segment_lengths, segment_lengths);
+        assert_eq!(pruned.transition_count, 194);
     }
 
     #[test]
