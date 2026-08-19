@@ -1,11 +1,21 @@
 projects = phase_common phase_rare switch ligate simulate xcftools
 
-.PHONY: all $(projects) benchmark benchmark-threads benchmark-edge benchmark-unit rng-test
+.PHONY: all $(projects) macos-arm64 clean-macos-arm64 benchmark benchmark-threads benchmark-edge benchmark-unit rng-test
 
 all: $(projects)
 
 $(projects):
 	$(MAKE) -C $@
+
+macos-arm64:
+	@set -e; for dir in $(projects); do \
+	$(MAKE) macos-arm64 -C $$dir; \
+	done
+
+clean-macos-arm64:
+	@set -e; for dir in $(projects); do \
+	$(MAKE) clean-macos-arm64 -C $$dir; \
+	done
 
 clean:
 	for dir in $(projects); do \

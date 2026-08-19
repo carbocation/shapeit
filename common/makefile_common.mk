@@ -41,7 +41,7 @@ BFILE=bin/$(NAME)
 EXEFILE=bin/$(NAME)_static
 
 # Only search for libraries if goals != clean
-ifeq (,$(filter clean,$(MAKECMDGOALS)))
+ifeq (,$(filter clean macos-arm64 clean-macos-arm64,$(MAKECMDGOALS)))
 
 #################################
 # HTSLIB for static compilation #
@@ -181,3 +181,5 @@ obj/%.o: %.cpp $(HFILE) $(RNG_HEADERS)
 
 clean:
 	rm -f obj/*.o $(BFILE) $(EXEFILE)
+
+include ../common/makefile_macos_arm64.mk
