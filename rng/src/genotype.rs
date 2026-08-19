@@ -1061,6 +1061,21 @@ fn validate_sample_layout(
 }
 
 #[inline]
+fn probability_index(probabilities: &[f64], total: f64, quantile: f64) -> usize {
+    debug_assert!(!probabilities.is_empty() && total.is_finite() && total > 0.0);
+    debug_assert!((0.0..1.0).contains(&quantile));
+    let mut cumulative = probabilities[0];
+    let draw = quantile * total;
+    for index in 0..probabilities.len() - 1 {
+        if draw < cumulative {
+            return index;
+        }
+        cumulative += probabilities[index + 1];
+    }
+    probabilities.len() - 1
+}
+
+#[inline]
 fn sample_probabilities(
     probabilities: &[f64],
     total: f64,
@@ -1069,15 +1084,7 @@ fn sample_probabilities(
     if probabilities.is_empty() || !total.is_finite() || total <= 0.0 {
         return Err(SampleError::DegenerateDistribution);
     }
-    let mut cumulative = probabilities[0];
-    let draw = rng.next_f64() * total;
-    for index in 0..probabilities.len() - 1 {
-        if draw < cumulative {
-            return Ok(index);
-        }
-        cumulative += probabilities[index + 1];
-    }
-    Ok(probabilities.len() - 1)
+    Ok(probability_index(probabilities, total, rng.next_f64()))
 }
 
 #[inline]
@@ -1115,6 +1122,29 @@ fn sample_forward(
         transition_offset += previous_count * current_count;
         previous_count = current_count;
     }
+    Ok(())
+}
+
+fn sample_one_segment(
+    diplotype: u64,
+    transition_probabilities: &[f64],
+    sampled: &mut [u8],
+    quantile: f64,
+) -> Result<(), SampleError> {
+    let diplotype_count = diplotype.count_ones() as usize;
+    let probabilities = &transition_probabilities[..diplotype_count];
+    let mut total = 0.0f64;
+    for &probability in probabilities {
+        if !probability.is_finite() || probability < 0.0 {
+            return Err(SampleError::DegenerateDistribution);
+        }
+        total += probability;
+    }
+    if !total.is_finite() || total <= 0.0 {
+        return Err(SampleError::DegenerateDistribution);
+    }
+    let sampled_index = probability_index(probabilities, total, quantile);
+    sampled[0] = diplotype_code(diplotype, sampled_index);
     Ok(())
 }
 
@@ -1196,8 +1226,17 @@ fn sample_validated(
     } = parameters;
     let mut rng = LogicalRng::new(seed, domain, iteration, item);
     let mut sampled = vec![0u8; diplotypes.len()];
-    if rng.next_f64() < 0.5 {
+    let direction = rng.next_f64();
+    if direction < 0.5 {
         sample_forward(diplotypes, transition_probabilities, &mut sampled, &mut rng)?;
+    } else if diplotypes.len() == 1 {
+        // This is uniform conditional on choosing backward and preserves later draw positions.
+        sample_one_segment(
+            diplotypes[0],
+            transition_probabilities,
+            &mut sampled,
+            direction * 2.0 - 1.0,
+        )?;
     } else {
         sample_backward(
             diplotypes,
@@ -3796,6 +3835,62 @@ mod tests {
     }
 
     #[test]
+    fn one_segment_backward_sampler_preserves_the_missing_draw_stream() {
+        let mut direction_rng = LogicalRng::new(0, 0, 0, 0);
+        let direction = direction_rng.next_f64();
+        assert!(direction >= 0.5);
+        assert!(direction * 2.0 - 1.0 < 0.5);
+        let first_missing_draw = direction_rng.next_f64();
+        let shifted_missing_draw = direction_rng.next_f64();
+        let missing_probability = ((first_missing_draw + shifted_missing_draw) * 0.5) as f32;
+        assert_ne!(
+            first_missing_draw <= f64::from(missing_probability),
+            shifted_missing_draw <= f64::from(missing_probability)
+        );
+
+        let mut variants = [0x12u8];
+        let ambiguous = [0xaau8];
+        let diplotypes = [(1u64 << 1) | (1u64 << 8)];
+        let lengths = [2u16];
+        let transitions = [0.5f64, 0.5];
+        let missing = [missing_probability; 8];
+        let status = unsafe {
+            shapeit_genotype_sample_v1(
+                variants.as_mut_ptr(),
+                variants.len(),
+                2,
+                ambiguous.as_ptr(),
+                ambiguous.len(),
+                diplotypes.as_ptr(),
+                diplotypes.len(),
+                lengths.as_ptr(),
+                lengths.len(),
+                transitions.as_ptr(),
+                transitions.len(),
+                missing.as_ptr(),
+                missing.len(),
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(variant_nibble(&variants, 0), 0x0a);
+        let missing_code = variant_nibble(&variants, 1);
+        assert_eq!(graph_code(missing_code), 1);
+        assert_eq!(
+            missing_code & 4 != 0,
+            first_missing_draw <= f64::from(missing_probability)
+        );
+        assert_eq!(
+            missing_code & 8 != 0,
+            shifted_missing_draw <= f64::from(missing_probability)
+        );
+    }
+
+    #[test]
     fn forward_sampler_rejects_zero_mass_row_before_indexing_the_next_block() {
         let diplotypes = [0b11u64; 3];
         let transitions = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.25, 0.25, 0.25];
@@ -3827,6 +3922,32 @@ mod tests {
             Err(SampleError::DegenerateDistribution)
         );
         assert_eq!(sampled[0], 0xa5);
+    }
+
+    #[test]
+    fn one_segment_sampler_uses_transition_probabilities() {
+        let diplotypes = (1u64 << 9) | (1u64 << 18);
+        let transitions = [0.0f64, 1.0];
+        let mut sampled = [0xa5u8];
+
+        assert_eq!(
+            sample_one_segment(diplotypes, &transitions, &mut sampled, 0.0),
+            Ok(())
+        );
+        assert_eq!(sampled, [18]);
+    }
+
+    #[test]
+    fn one_segment_sampler_rejects_zero_mass() {
+        let diplotypes = [1u64 << 8];
+        let transitions = [0.0f64];
+        let mut sampled = [0xa5u8];
+
+        assert_eq!(
+            sample_one_segment(diplotypes[0], &transitions, &mut sampled, 0.5),
+            Err(SampleError::DegenerateDistribution)
+        );
+        assert_eq!(sampled, [0xa5]);
     }
 
     #[test]
