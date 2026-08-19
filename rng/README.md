@@ -81,7 +81,7 @@ probabilities, and storage-event count. Final solving reads it in place, while
 the graph writer receives a read-only view using the legacy LSB-first mask
 encoding. The standalone storage ABI remains available for external callers.
 
-Pedigree scaffolding and the established haploid-heterozygote reset operate on
+Pedigree scaffolding and the haploid-heterozygote reset operate on
 whole packed samples through checked Rust calls. `shapeit_genotype_prune_v1`
 owns a complete graph-pruning round: it ranks transition mass, selects
 non-adjacent merges, rebuilds ambiguity and diplotype encodings, and recomputes

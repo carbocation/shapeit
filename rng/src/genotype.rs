@@ -2111,7 +2111,7 @@ pub unsafe extern "C" fn shapeit_genotype_pedigree_scaffold_v1(
 }
 
 #[no_mangle]
-/// Preserve the established packed-bit reset of ambiguous haploid genotypes.
+/// Reset ambiguous haploid genotypes to missing while preserving their allele bits.
 ///
 /// # Safety
 ///
@@ -2156,7 +2156,7 @@ pub unsafe extern "C" fn shapeit_genotype_reset_haploid_hets_v1(
     for locus in 0..variant_count {
         let code = variant_nibble(variants, locus);
         if graph_code(code) > 1 {
-            set_variant_nibble(variants, locus, code | 1);
+            set_variant_nibble(variants, locus, (code & !3) | 1);
             count = count.wrapping_add(1);
         }
     }
@@ -3484,20 +3484,23 @@ mod tests {
     }
 
     #[test]
-    fn haploid_reset_preserves_existing_bitwise_missing_semantics() {
-        let mut variants = pack(&[2, 3, 0, 1]);
+    fn haploid_reset_changes_ambiguous_codes_to_missing() {
+        let mut variants = pack(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
         let mut reset_count = 0u32;
         let status = unsafe {
             shapeit_genotype_reset_haploid_hets_v1(
                 variants.as_mut_ptr(),
                 variants.len(),
-                4,
+                16,
                 &mut reset_count,
             )
         };
         assert_eq!(status, STATUS_OK);
-        assert_eq!(variants, pack(&[3, 3, 0, 1]));
-        assert_eq!(reset_count, 2);
+        assert_eq!(
+            variants,
+            pack(&[0, 1, 1, 1, 4, 5, 5, 5, 8, 9, 9, 9, 12, 13, 13, 13])
+        );
+        assert_eq!(reset_count, 8);
     }
 
     #[test]
