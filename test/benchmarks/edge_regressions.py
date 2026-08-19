@@ -43,6 +43,12 @@ SCENARIOS = {
         "--pbwt-mac",
         "100000",
     ),
+    "rare-map-tail": with_extra_arguments(
+        CASES["rare-scaffolded"],
+        "rare-map-tail",
+        "--map",
+        str(REPOSITORY / "test/info/chr1.truncated.gmap"),
+    ),
 }
 
 

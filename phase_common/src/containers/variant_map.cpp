@@ -118,7 +118,7 @@ int variant_map::interpolateCentiMorgan(vector < int > & pos_bp, vector < double
 		if (vec_pos[i_locus]->cm == -1) {
 
 			//Find suitable interpolation interval
-			while (vec_pos[i_locus]->bp > pos_bp[closest_pos] && closest_pos < pos_bp.size()) closest_pos++;
+			while (closest_pos < pos_bp.size() && vec_pos[i_locus]->bp > pos_bp[closest_pos]) closest_pos++;
 
 			//Interpolate
 			if (closest_pos < pos_bp.size()) {
