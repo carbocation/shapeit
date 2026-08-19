@@ -49,16 +49,17 @@ void haplotype_writer::writeHaplotypes(string foutput, string finput, string ffo
 	//Allocate buffers
 	int32_t * output_buffer = (int32_t *) malloc(G.n_ind * 2 * sizeof(int32_t));
 	bitvector output_bitvector (G.n_ind * 2);
+	const int32_t output_allele_count = 2 * G.n_ind;
 
 	//Write records
 	for (int l = 0 ; l < V.size() ; l ++) {
 
 		//Get AC/AN
-		int32_t vAC = 0, vAN = H.n_hap;
+		int32_t vAC = 0;
 		for (int32_t h = 0 ; h < 2*G.n_ind ; h++) vAC += H.H_opt_var.get(l, h);
 
 		//Variant information
-		XW.writeInfo(V.vec_pos[l]->chr, V.vec_pos[l]->bp, V.vec_pos[l]->ref, V.vec_pos[l]->alt, V.vec_pos[l]->id, vAC, vAN);
+		XW.writeInfo(V.vec_pos[l]->chr, V.vec_pos[l]->bp, V.vec_pos[l]->ref, V.vec_pos[l]->alt, V.vec_pos[l]->id, vAC, output_allele_count);
 
 		//Write haplotypes in BCF format
 		if (hts_genotypes) {

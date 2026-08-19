@@ -18,6 +18,7 @@ from vcf_compare import (
     compare_paths,
     load_dataset,
     scientific_gt_digest,
+    validate_allele_count_metadata,
 )
 
 
@@ -237,6 +238,8 @@ def run_case(
     if not output.is_file() or output.stat().st_size == 0:
         raise RuntimeError(f"{label}/{case.name} produced no output; see {log}")
 
+    allele_count_records = validate_allele_count_metadata(output)
+
     truth = compare_paths(case.truth, output)
     if not truth.samples_equal or not truth.variants_equal or truth.genotype_errors:
         raise RuntimeError(
@@ -276,6 +279,7 @@ def run_case(
         "output": str(output),
         "exact_gt_sha256": exact_digest,
         "scientific_gt_sha256": scientific_digest,
+        "allele_count_records": allele_count_records,
         "truth": truth.as_dict(),
     }
     if recorded_status:

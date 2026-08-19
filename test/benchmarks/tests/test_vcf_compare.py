@@ -11,6 +11,7 @@ from vcf_compare import (  # noqa: E402
     compare_paths,
     load_dataset,
     scientific_gt_digest,
+    validate_allele_count_metadata,
 )
 
 
@@ -91,6 +92,35 @@ class VcfComparisonTest(unittest.TestCase):
         right = records(("0|1", "1|0"), ("1|1", "0|0"))
         result = self.compare(left, right, allow_right_superset=True)
         self.assertTrue(result.scientifically_equivalent)
+
+    def test_allele_count_metadata_matches_called_genotypes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "counts.vcf"
+            path.write_text(
+                HEADER
+                + "1\t1\t.\tA\tC\t.\tPASS\tAC=2;AN=3\tGT\t0|1\t1|.\n"
+            )
+            self.assertEqual(validate_allele_count_metadata(path), 1)
+
+    def test_allele_count_metadata_rejects_reference_inflated_an(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "counts.vcf"
+            path.write_text(
+                HEADER
+                + "1\t1\t.\tA\tC\t.\tPASS\tAC=2;AN=7\tGT\t0|1\t1|.\n"
+            )
+            with self.assertRaisesRegex(ValueError, "INFO allele counts disagree"):
+                validate_allele_count_metadata(path)
+
+    def test_allele_count_metadata_rejects_wrong_ac(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "counts.vcf"
+            path.write_text(
+                HEADER
+                + "1\t1\t.\tA\tC\t.\tPASS\tAC=1;AN=3\tGT\t0|1\t1|.\n"
+            )
+            with self.assertRaisesRegex(ValueError, "INFO allele counts disagree"):
+                validate_allele_count_metadata(path)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,12 @@ def with_extra_arguments(case: Case, name: str, *arguments: str) -> Case:
 
 
 SCENARIOS = {
+    "common-reference-info": with_extra_arguments(
+        CASES["common-unrelated"],
+        "common-reference-info",
+        "--reference",
+        str(CASES["common-unrelated"].truth),
+    ),
     "common-sparse-fallback": with_extra_arguments(
         CASES["common-unrelated"],
         "common-sparse-fallback",

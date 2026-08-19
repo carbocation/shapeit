@@ -157,6 +157,90 @@ def load_dataset(path: str | Path) -> PhasedDataset:
     return PhasedDataset(samples, tuple(variants))
 
 
+def validate_allele_count_metadata(path: str | Path) -> int:
+    """Require INFO/AC and INFO/AN to match the called GT alleles."""
+    source = Path(path)
+    samples: tuple[str, ...] | None = None
+    record_count = 0
+    with _open_variant_text(source) as stream:
+        for raw_line in stream:
+            line = raw_line.rstrip("\r\n")
+            if not line or line.startswith("##"):
+                continue
+            fields = line.split("\t")
+            if line.startswith("#CHROM"):
+                samples = tuple(fields[9:])
+                continue
+            if line.startswith("#"):
+                continue
+            if samples is None:
+                raise ValueError(f"{source}: records precede the #CHROM header")
+            if len(fields) != 9 + len(samples):
+                raise ValueError(f"{source}: malformed record at {fields[0]}:{fields[1]}")
+
+            info = {}
+            for entry in fields[7].split(";"):
+                key, separator, value = entry.partition("=")
+                if separator:
+                    info[key] = value
+            try:
+                reported_ac = tuple(int(value) for value in info["AC"].split(","))
+                reported_an = int(info["AN"])
+            except (KeyError, ValueError) as error:
+                raise ValueError(
+                    f"{source}: invalid AC/AN at {fields[0]}:{fields[1]}"
+                ) from error
+
+            alternate_count = len(fields[4].split(","))
+            if len(reported_ac) != alternate_count:
+                raise ValueError(
+                    f"{source}: AC cardinality does not match ALT at "
+                    f"{fields[0]}:{fields[1]}"
+                )
+            formats = fields[8].split(":")
+            try:
+                gt_index = formats.index("GT")
+            except ValueError as error:
+                raise ValueError(
+                    f"{source}: record lacks GT at {fields[0]}:{fields[1]}"
+                ) from error
+
+            expected_ac = [0] * alternate_count
+            expected_an = 0
+            for sample_field in fields[9:]:
+                values = sample_field.split(":")
+                genotype = values[gt_index] if gt_index < len(values) else "."
+                alleles, _ = _alleles(genotype)
+                for value in alleles:
+                    if value == ".":
+                        continue
+                    try:
+                        allele = int(value)
+                    except ValueError as error:
+                        raise ValueError(
+                            f"{source}: invalid GT allele at {fields[0]}:{fields[1]}"
+                        ) from error
+                    if allele < 0 or allele > alternate_count:
+                        raise ValueError(
+                            f"{source}: GT allele is outside ALT range at "
+                            f"{fields[0]}:{fields[1]}"
+                        )
+                    expected_an += 1
+                    if allele > 0:
+                        expected_ac[allele - 1] += 1
+
+            if reported_an != expected_an or reported_ac != tuple(expected_ac):
+                raise ValueError(
+                    f"{source}: INFO allele counts disagree with GT at "
+                    f"{fields[0]}:{fields[1]}: AC={reported_ac}, AN={reported_an}, "
+                    f"expected AC={tuple(expected_ac)}, AN={expected_an}"
+                )
+            record_count += 1
+    if samples is None:
+        raise ValueError(f"{source}: no #CHROM header")
+    return record_count
+
+
 def canonical_gt_digest(dataset: PhasedDataset, keys: Iterable[VariantKey] | None = None) -> str:
     selected = set(keys) if keys is not None else None
     digest = hashlib.sha256()
