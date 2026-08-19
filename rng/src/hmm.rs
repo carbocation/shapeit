@@ -452,6 +452,43 @@ struct ValidatedLayout {
     transition_last: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct HmmGraphPrefix {
+    loci: usize,
+    ambiguous: usize,
+    missing: usize,
+    transitions: usize,
+}
+
+#[derive(Debug)]
+struct ValidatedHmmGraph {
+    // Entry i contains the cumulative graph dimensions before segment i.
+    prefixes: Vec<HmmGraphPrefix>,
+}
+
+#[derive(Debug)]
+struct DoubleJobValidation {
+    // This cache is scoped to one job invocation (and its precision retries),
+    // so graph pruning or conditioning-job reuse cannot make it stale.
+    graph: ValidatedHmmGraph,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static DOUBLE_GRAPH_VALIDATION_SCANS: core::cell::Cell<usize> = const {
+        core::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+fn record_double_graph_validation_scan() {
+    DOUBLE_GRAPH_VALIDATION_SCANS.with(|scans| scans.set(scans.get() + 1));
+}
+
+#[cfg(not(test))]
+#[inline]
+fn record_double_graph_validation_scan() {}
+
 #[inline]
 fn variant_code(variants: &[u8], locus: usize) -> u8 {
     (variants[locus >> 1] >> ((locus & 1) << 2)) & 3
@@ -506,12 +543,7 @@ fn signed_stop(count: usize) -> Result<i32, u32> {
     }
 }
 
-fn validate(
-    parameters: &HmmSegmentDoubleV1,
-    variants: &[u8],
-    segment_lengths: &[u16],
-    diplotypes: &[u64],
-) -> Result<ValidatedLayout, u32> {
+fn validate_double_scalars(parameters: &HmmSegmentDoubleV1) -> Result<(), u32> {
     if parameters.abi_version != ABI_VERSION
         || parameters.struct_size as usize != mem::size_of::<HmmSegmentDoubleV1>()
         || parameters.effective_population_size <= 0
@@ -520,104 +552,114 @@ fn validate(
         || !parameters.emission_mismatch.is_finite()
         || parameters.emission_match == 0.0
     {
-        return Err(STATUS_INVALID_DIMENSIONS);
+        Err(STATUS_INVALID_DIMENSIONS)
+    } else {
+        Ok(())
     }
+}
 
-    let segment_first = usize_coordinate(parameters.segment_first)?;
-    let segment_last = usize_coordinate(parameters.segment_last)?;
-    let locus_first = usize_coordinate(parameters.locus_first)?;
-    let locus_last = usize_coordinate(parameters.locus_last)?;
-    if segment_first > segment_last
-        || segment_last >= segment_lengths.len()
-        || segment_lengths.len() > diplotypes.len()
-        || locus_first > locus_last
-    {
+fn validate_hmm_graph(
+    variants: &[u8],
+    segment_lengths: &[u16],
+    diplotypes: &[u64],
+) -> Result<ValidatedHmmGraph, u32> {
+    record_double_graph_validation_scan();
+    if segment_lengths.len() > diplotypes.len() {
         return Err(STATUS_OUT_OF_BOUNDS);
     }
     if segment_lengths.contains(&0) || diplotypes[..segment_lengths.len()].contains(&0) {
         return Err(STATUS_INVALID_DIMENSIONS);
     }
 
-    let segment_count = segment_last - segment_first + 1;
-    let mut total_variants = 0usize;
-    let mut total_ambiguous = 0usize;
-    let mut total_missing = 0usize;
-    let mut transition_total = 0usize;
-    let mut previous_diplotypes = 1usize;
-    let mut expected_locus_first = 0usize;
-    let mut expected_locus_last = 0usize;
-    let mut expected_ambiguous_first = 0usize;
-    let mut expected_ambiguous_stop = -1i32;
-    let mut expected_missing_first = 0usize;
-    let mut expected_missing_stop = -1i32;
-    let mut expected_transition_first = 0usize;
-    let mut expected_transition_last = 0usize;
-
-    let required_variant_bytes = segment_lengths
+    let total_loci = segment_lengths
         .iter()
         .try_fold(0usize, |sum, &length| sum.checked_add(length as usize))
-        .ok_or(STATUS_INTEGER_OVERFLOW)?
-        .checked_add(1)
-        .ok_or(STATUS_INTEGER_OVERFLOW)?
-        >> 1;
+        .ok_or(STATUS_INTEGER_OVERFLOW)?;
+    let required_variant_bytes = total_loci.checked_add(1).ok_or(STATUS_INTEGER_OVERFLOW)? >> 1;
     if variants.len() < required_variant_bytes {
         return Err(STATUS_OUT_OF_BOUNDS);
     }
 
-    for (segment, (&length, &diplotype_mask)) in
-        segment_lengths.iter().zip(diplotypes.iter()).enumerate()
-    {
-        if segment == segment_first {
-            expected_locus_first = total_variants;
-            expected_ambiguous_first = total_ambiguous;
-            expected_missing_first = total_missing;
-        }
-        let segment_stop = total_variants
+    let prefix_capacity = segment_lengths
+        .len()
+        .checked_add(1)
+        .ok_or(STATUS_INTEGER_OVERFLOW)?;
+    let mut prefixes = Vec::with_capacity(prefix_capacity);
+    prefixes.push(HmmGraphPrefix::default());
+    let mut prefix = HmmGraphPrefix::default();
+    let mut previous_diplotypes = 1usize;
+    for (&length, &diplotype_mask) in segment_lengths.iter().zip(diplotypes.iter()) {
+        let segment_stop = prefix
+            .loci
             .checked_add(length as usize)
             .ok_or(STATUS_INTEGER_OVERFLOW)?;
-        for locus in total_variants..segment_stop {
+        for locus in prefix.loci..segment_stop {
             match variant_code(variants, locus) {
                 1 => {
-                    total_missing = total_missing
+                    prefix.missing = prefix
+                        .missing
                         .checked_add(1)
                         .ok_or(STATUS_INTEGER_OVERFLOW)?
                 }
                 2 | 3 => {
-                    total_ambiguous = total_ambiguous
+                    prefix.ambiguous = prefix
+                        .ambiguous
                         .checked_add(1)
                         .ok_or(STATUS_INTEGER_OVERFLOW)?
                 }
                 _ => {}
             }
         }
-        total_variants = segment_stop;
+        prefix.loci = segment_stop;
 
         let current_diplotypes = diplotype_count(diplotype_mask);
         let transition_count = previous_diplotypes
             .checked_mul(current_diplotypes)
             .ok_or(STATUS_INTEGER_OVERFLOW)?;
-        transition_total = transition_total
+        prefix.transitions = prefix
+            .transitions
             .checked_add(transition_count)
             .ok_or(STATUS_INTEGER_OVERFLOW)?;
-        if segment == segment_first {
-            expected_transition_first = transition_total;
-        }
-        if segment == segment_last {
-            expected_locus_last = total_variants - 1;
-            expected_ambiguous_stop = signed_stop(total_ambiguous)?;
-            expected_missing_stop = signed_stop(total_missing)?;
-            expected_transition_last = transition_total - 1;
-        }
+        prefixes.push(prefix);
         previous_diplotypes = current_diplotypes;
     }
+
+    debug_assert_eq!(prefix.loci, total_loci);
+    Ok(ValidatedHmmGraph { prefixes })
+}
+
+fn validate_hmm_window(
+    parameters: &HmmSegmentDoubleV1,
+    graph: &ValidatedHmmGraph,
+) -> Result<ValidatedLayout, u32> {
+    validate_double_scalars(parameters)?;
+
+    let segment_first = usize_coordinate(parameters.segment_first)?;
+    let segment_last = usize_coordinate(parameters.segment_last)?;
+    let locus_first = usize_coordinate(parameters.locus_first)?;
+    let locus_last = usize_coordinate(parameters.locus_last)?;
+    let segment_count = graph.prefixes.len().saturating_sub(1);
+    if segment_first > segment_last || segment_last >= segment_count || locus_first > locus_last {
+        return Err(STATUS_OUT_OF_BOUNDS);
+    }
+
+    let before = graph.prefixes[segment_first];
+    let after_first = graph.prefixes[segment_first + 1];
+    let after = graph.prefixes[segment_last + 1];
+    let expected_locus_first = before.loci;
+    let expected_locus_last = after.loci - 1;
+    let expected_ambiguous_stop = signed_stop(after.ambiguous)?;
+    let expected_missing_stop = signed_stop(after.missing)?;
+    let expected_transition_first = after_first.transitions;
+    let expected_transition_last = after.transitions - 1;
 
     if locus_first != expected_locus_first
         || locus_last != expected_locus_last
         || parameters.ambiguous_first
-            != i32::try_from(expected_ambiguous_first).map_err(|_| STATUS_INTEGER_OVERFLOW)?
+            != i32::try_from(before.ambiguous).map_err(|_| STATUS_INTEGER_OVERFLOW)?
         || parameters.ambiguous_last != expected_ambiguous_stop
         || parameters.missing_first
-            != i32::try_from(expected_missing_first).map_err(|_| STATUS_INTEGER_OVERFLOW)?
+            != i32::try_from(before.missing).map_err(|_| STATUS_INTEGER_OVERFLOW)?
         || parameters.missing_last != expected_missing_stop
         || parameters.transition_first
             != i32::try_from(expected_transition_first).map_err(|_| STATUS_INTEGER_OVERFLOW)?
@@ -627,16 +669,14 @@ fn validate(
         return Err(STATUS_INVALID_DIMENSIONS);
     }
 
-    let window_missing_end =
-        usize::try_from(expected_missing_stop + 1).map_err(|_| STATUS_INTEGER_OVERFLOW)?;
-    let window_missing_count = window_missing_end - expected_missing_first;
+    let window_missing_count = after.missing - before.missing;
     let scratch = scratch_layout(
         parameters.conditioning_haplotypes,
-        segment_count,
+        segment_last - segment_first + 1,
         window_missing_count,
     )?;
     if parameters.scratch_length < scratch.total
-        || parameters.alpha_locus_scratch_length < segment_count
+        || parameters.alpha_locus_scratch_length < scratch.segment_count
     {
         return Err(STATUS_OUT_OF_BOUNDS);
     }
@@ -655,13 +695,15 @@ fn validate(
     let required_haplotype_length = haplotype_rows
         .checked_mul(parameters.haplotype_stride)
         .ok_or(STATUS_INTEGER_OVERFLOW)?;
+    let totals = graph.prefixes[segment_count];
     if required_haplotype_length > parameters.haplotypes_length
-        || total_ambiguous > parameters.ambiguous_length
-        || total_variants > parameters.centimorgans_length
-        || total_variants > parameters.rare_alleles_length
-        || total_variants.saturating_sub(1) > parameters.recombination_length
-        || transition_total > parameters.transition_probabilities_length
-        || total_missing
+        || totals.ambiguous > parameters.ambiguous_length
+        || totals.loci > parameters.centimorgans_length
+        || totals.loci > parameters.rare_alleles_length
+        || totals.loci.saturating_sub(1) > parameters.recombination_length
+        || totals.transitions > parameters.transition_probabilities_length
+        || totals
+            .missing
             .checked_mul(HAPLOTYPES)
             .ok_or(STATUS_INTEGER_OVERFLOW)?
             > parameters.missing_probabilities_length
@@ -675,10 +717,21 @@ fn validate(
         segment_last,
         locus_first,
         locus_last,
-        ambiguous_first: expected_ambiguous_first,
-        missing_first: expected_missing_first,
+        ambiguous_first: before.ambiguous,
+        missing_first: before.missing,
         transition_last: expected_transition_last,
     })
+}
+
+fn validate(
+    parameters: &HmmSegmentDoubleV1,
+    variants: &[u8],
+    segment_lengths: &[u16],
+    diplotypes: &[u64],
+) -> Result<ValidatedLayout, u32> {
+    validate_double_scalars(parameters)?;
+    let graph = validate_hmm_graph(variants, segment_lengths, diplotypes)?;
+    validate_hmm_window(parameters, &graph)
 }
 
 extern "C" {
@@ -1489,6 +1542,7 @@ unsafe fn run_job_window_double(
     inputs: &JobWindowInputs<'_>,
     scratch: &mut Vec<f64>,
     alpha_locus: &mut Vec<i32>,
+    validation: &mut Option<DoubleJobValidation>,
 ) -> Result<i32, u32> {
     let segment_count = inclusive_count(
         inputs.window.start_segment,
@@ -1548,13 +1602,18 @@ unsafe fn run_job_window_double(
         alpha_locus_scratch: alpha_locus.as_mut_ptr(),
         alpha_locus_scratch_length: alpha_locus.len(),
     };
-    let mut outcome = 0;
-    let status = shapeit_hmm_run_segment_double_v1(&parameters, &mut outcome);
-    if status == STATUS_OK {
-        Ok(outcome)
+    let validated_layout = if let Some(validation) = validation.as_ref() {
+        validate_hmm_window(&parameters, &validation.graph)?
     } else {
-        Err(status)
-    }
+        let graph = validate_hmm_graph(inputs.variants, inputs.segment_lengths, inputs.diplotypes)?;
+        let layout = validate_hmm_window(&parameters, &graph)?;
+        *validation = Some(DoubleJobValidation { graph });
+        layout
+    };
+    Ok(run_segment_double_prevalidated(
+        &parameters,
+        validated_layout,
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1670,8 +1729,9 @@ unsafe fn run_job_window_extended_precision(
     inputs: &JobWindowInputs<'_>,
     scratch: &mut Vec<f64>,
     alpha_locus: &mut Vec<i32>,
+    validation: &mut Option<DoubleJobValidation>,
 ) -> Result<ExtendedPrecisionOutcome, u32> {
-    let outcome = run_job_window_double(inputs, scratch, alpha_locus)?;
+    let outcome = run_job_window_double(inputs, scratch, alpha_locus, validation)?;
     if outcome >= 0 && window_hmm_output_is_valid(inputs) {
         return Ok(ExtendedPrecisionOutcome {
             outcome,
@@ -1766,10 +1826,11 @@ unsafe fn run_job_window_single(
     }
 }
 
-unsafe fn run_hmm_job_v1(
+unsafe fn run_hmm_job_v1_cached(
     parameters: &HmmJobV1,
     result: &mut HmmJobResultV1,
     force_log_domain: bool,
+    double_validation: &mut Option<DoubleJobValidation>,
 ) -> u32 {
     if parameters.abi_version != ABI_VERSION
         || parameters.struct_size as usize != mem::size_of::<HmmJobV1>()
@@ -1921,6 +1982,7 @@ unsafe fn run_hmm_job_v1(
                 &window_inputs,
                 double_scratch,
                 alpha_locus_scratch,
+                double_validation,
             ) {
                 Ok(value) => {
                     if value.used_log_domain && value.outcome >= 0 {
@@ -1947,6 +2009,7 @@ unsafe fn run_hmm_job_v1(
                     &window_inputs,
                     double_scratch,
                     alpha_locus_scratch,
+                    double_validation,
                 ) {
                     Ok(value) => value,
                     Err(status) => return status,
@@ -1977,6 +2040,15 @@ unsafe fn run_hmm_job_v1(
     }
     *result = local_result;
     STATUS_OK
+}
+
+unsafe fn run_hmm_job_v1(
+    parameters: &HmmJobV1,
+    result: &mut HmmJobResultV1,
+    force_log_domain: bool,
+) -> u32 {
+    let mut double_validation = None;
+    run_hmm_job_v1_cached(parameters, result, force_log_domain, &mut double_validation)
 }
 
 #[no_mangle]
@@ -2122,7 +2194,13 @@ pub unsafe extern "C" fn shapeit_hmm_run_phase_job_v1(
         missing_probabilities_length: missing_probabilities.len(),
     };
     let mut local_result = HmmJobResultV1::default();
-    let mut hmm_status = run_hmm_job_v1(&hmm_parameters, &mut local_result, false);
+    let mut double_validation = None;
+    let mut hmm_status = run_hmm_job_v1_cached(
+        &hmm_parameters,
+        &mut local_result,
+        false,
+        &mut double_validation,
+    );
     let mut sample_result = if hmm_status == STATUS_OK && local_result.fatal_outcome == 0 {
         sample_complete_hmm_output(
             &mut *parameters.graph,
@@ -2143,7 +2221,12 @@ pub unsafe extern "C" fn shapeit_hmm_run_phase_job_v1(
     if sample_result == Err(SampleError::DegenerateDistribution) && !initially_requires_double {
         (*parameters.graph).require_double_precision();
         let mut retry_result = HmmJobResultV1::default();
-        hmm_status = run_hmm_job_v1(&hmm_parameters, &mut retry_result, false);
+        hmm_status = run_hmm_job_v1_cached(
+            &hmm_parameters,
+            &mut retry_result,
+            false,
+            &mut double_validation,
+        );
         if hmm_status == STATUS_OK && retry_result.fatal_outcome == 0 {
             retry_result.underflow_recovered_precision =
                 match retry_result.underflow_recovered_precision.checked_add(1) {
@@ -2176,7 +2259,12 @@ pub unsafe extern "C" fn shapeit_hmm_run_phase_job_v1(
         (*parameters.graph).require_double_precision();
         let prior_precision_recoveries = local_result.underflow_recovered_precision;
         let mut log_result = HmmJobResultV1::default();
-        hmm_status = run_hmm_job_v1(&hmm_parameters, &mut log_result, true);
+        hmm_status = run_hmm_job_v1_cached(
+            &hmm_parameters,
+            &mut log_result,
+            true,
+            &mut double_validation,
+        );
         if hmm_status == STATUS_OK && log_result.fatal_outcome == 0 {
             log_result.underflow_recovered_precision =
                 match prior_precision_recoveries.checked_add(1) {
@@ -3002,54 +3090,10 @@ pub unsafe extern "C" fn shapeit_hmm_double_scratch_len_v1(
     STATUS_OK
 }
 
-#[no_mangle]
-/// Run one complete double-precision common-phasing HMM window.
-///
-/// # Safety
-///
-/// `parameters` and `outcome` must be valid for their types. Every non-empty
-/// buffer in `parameters` must be valid for its stated length. Mutable buffers
-/// must not overlap each other or any input buffer. Invalid layouts are
-/// reported before any caller-owned output buffer is written.
-pub unsafe extern "C" fn shapeit_hmm_run_segment_double_v1(
-    parameters: *const HmmSegmentDoubleV1,
-    outcome: *mut i32,
-) -> u32 {
-    if parameters.is_null() || outcome.is_null() {
-        return STATUS_NULL_POINTER;
-    }
-    let parameters = &*parameters;
-    for result in [
-        require_const_pointer(parameters.variants, parameters.variants_length),
-        require_const_pointer(parameters.ambiguous, parameters.ambiguous_length),
-        require_const_pointer(
-            parameters.segment_lengths,
-            parameters.segment_lengths_length,
-        ),
-        require_const_pointer(parameters.diplotypes, parameters.diplotypes_length),
-        require_const_pointer(parameters.haplotypes, parameters.haplotypes_length),
-        require_const_pointer(parameters.centimorgans, parameters.centimorgans_length),
-        require_const_pointer(parameters.recombination, parameters.recombination_length),
-        require_const_pointer(parameters.rare_alleles, parameters.rare_alleles_length),
-        require_mut_pointer(
-            parameters.transition_probabilities,
-            parameters.transition_probabilities_length,
-        ),
-        require_mut_pointer(
-            parameters.missing_probabilities,
-            parameters.missing_probabilities_length,
-        ),
-        require_mut_pointer(parameters.scratch, parameters.scratch_length),
-        require_mut_pointer(
-            parameters.alpha_locus_scratch,
-            parameters.alpha_locus_scratch_length,
-        ),
-    ] {
-        if let Err(status) = result {
-            return status;
-        }
-    }
-
+unsafe fn run_segment_double_prevalidated(
+    parameters: &HmmSegmentDoubleV1,
+    layout: ValidatedLayout,
+) -> i32 {
     let variants = const_slice(parameters.variants, parameters.variants_length);
     let ambiguous = const_slice(parameters.ambiguous, parameters.ambiguous_length);
     let segment_lengths = const_slice(
@@ -3057,11 +3101,6 @@ pub unsafe extern "C" fn shapeit_hmm_run_segment_double_v1(
         parameters.segment_lengths_length,
     );
     let diplotypes = const_slice(parameters.diplotypes, parameters.diplotypes_length);
-    let layout = match validate(parameters, variants, segment_lengths, diplotypes) {
-        Ok(value) => value,
-        Err(status) => return status,
-    };
-
     let haplotypes = const_slice(parameters.haplotypes, parameters.haplotypes_length);
     let centimorgans = const_slice(parameters.centimorgans, parameters.centimorgans_length);
     let recombination = const_slice(parameters.recombination, parameters.recombination_length);
@@ -3131,7 +3170,68 @@ pub unsafe extern "C" fn shapeit_hmm_run_segment_double_v1(
         h_probs: [0.0; HAPLOTYPES * HAPLOTYPES],
         d_probs: [0.0; HAPLOTYPES * HAPLOTYPES * HAPLOTYPES * HAPLOTYPES],
     };
-    *outcome = engine.run();
+    engine.run()
+}
+
+#[no_mangle]
+/// Run one complete double-precision common-phasing HMM window.
+///
+/// # Safety
+///
+/// `parameters` and `outcome` must be valid for their types. Every non-empty
+/// buffer in `parameters` must be valid for its stated length. Mutable buffers
+/// must not overlap each other or any input buffer. Invalid layouts are
+/// reported before any caller-owned output buffer is written.
+pub unsafe extern "C" fn shapeit_hmm_run_segment_double_v1(
+    parameters: *const HmmSegmentDoubleV1,
+    outcome: *mut i32,
+) -> u32 {
+    if parameters.is_null() || outcome.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    let parameters = &*parameters;
+    for result in [
+        require_const_pointer(parameters.variants, parameters.variants_length),
+        require_const_pointer(parameters.ambiguous, parameters.ambiguous_length),
+        require_const_pointer(
+            parameters.segment_lengths,
+            parameters.segment_lengths_length,
+        ),
+        require_const_pointer(parameters.diplotypes, parameters.diplotypes_length),
+        require_const_pointer(parameters.haplotypes, parameters.haplotypes_length),
+        require_const_pointer(parameters.centimorgans, parameters.centimorgans_length),
+        require_const_pointer(parameters.recombination, parameters.recombination_length),
+        require_const_pointer(parameters.rare_alleles, parameters.rare_alleles_length),
+        require_mut_pointer(
+            parameters.transition_probabilities,
+            parameters.transition_probabilities_length,
+        ),
+        require_mut_pointer(
+            parameters.missing_probabilities,
+            parameters.missing_probabilities_length,
+        ),
+        require_mut_pointer(parameters.scratch, parameters.scratch_length),
+        require_mut_pointer(
+            parameters.alpha_locus_scratch,
+            parameters.alpha_locus_scratch_length,
+        ),
+    ] {
+        if let Err(status) = result {
+            return status;
+        }
+    }
+
+    let variants = const_slice(parameters.variants, parameters.variants_length);
+    let segment_lengths = const_slice(
+        parameters.segment_lengths,
+        parameters.segment_lengths_length,
+    );
+    let diplotypes = const_slice(parameters.diplotypes, parameters.diplotypes_length);
+    let layout = match validate(parameters, variants, segment_lengths, diplotypes) {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
+    *outcome = run_segment_double_prevalidated(parameters, layout);
     STATUS_OK
 }
 
@@ -3139,6 +3239,14 @@ pub unsafe extern "C" fn shapeit_hmm_run_segment_double_v1(
 mod tests {
     use super::*;
     use core::ptr;
+
+    fn reset_double_graph_validation_scans() {
+        DOUBLE_GRAPH_VALIDATION_SCANS.with(|scans| scans.set(0));
+    }
+
+    fn double_graph_validation_scans() -> usize {
+        DOUBLE_GRAPH_VALIDATION_SCANS.with(core::cell::Cell::get)
+    }
 
     #[test]
     fn whole_job_runs_owned_windows_and_retains_workspace() {
@@ -3197,6 +3305,7 @@ mod tests {
             missing_probabilities_length: 0,
         };
         let mut result = HmmJobResultV1::default();
+        reset_double_graph_validation_scans();
         let status = unsafe { shapeit_hmm_run_job_v1(&parameters, &mut result) };
         assert_eq!(status, STATUS_OK);
         assert_eq!(result.fatal_outcome, 0);
@@ -3205,6 +3314,7 @@ mod tests {
         assert!((transitions.iter().sum::<f64>() - 1.0).abs() < 1e-12);
         assert!(!conditioning_job.subset_haplotypes.is_empty());
         assert!(!conditioning_job.single_scratch.is_empty());
+        assert_eq!(double_graph_validation_scans(), 0);
 
         transitions.fill(0.0);
         transitions[0] = f64::NAN;
@@ -3249,7 +3359,120 @@ mod tests {
         assert_eq!(phase_result.windows_completed, 1);
         assert_eq!(conditioning_job.transition_probabilities.len(), 64);
 
+        let repeated_window = conditioning_job.windows[0];
+        let repeated_states = conditioning_job.states[0].clone();
+        conditioning_job.windows.push(repeated_window);
+        conditioning_job.states.push(repeated_states);
+        unsafe { (*graph).require_double_precision() };
+        reset_double_graph_validation_scans();
+        let mut double_result = HmmJobResultV1::default();
+        let double_status = unsafe { shapeit_hmm_run_job_v1(&parameters, &mut double_result) };
+        assert_eq!(double_status, STATUS_OK);
+        assert_eq!(double_result.fatal_outcome, 0);
+        assert_eq!(double_result.windows_completed, 2);
+        assert_eq!(double_graph_validation_scans(), 1);
+
         unsafe { crate::genotype::shapeit_genotype_graph_free_v1(graph) };
+    }
+
+    #[test]
+    fn fp64_graph_validation_is_reused_for_noninitial_windows() {
+        let variants = [0u8; 2];
+        let segment_lengths = [1u16; 3];
+        let diplotypes = [1u64; 3];
+        let haplotypes = [0u8; 8];
+        let centimorgans = [0.0f32, 0.01, 0.02];
+        let recombination = [0.01f32; 2];
+        let rare_alleles = [-1i8; 3];
+        let mut transitions = [7.0f64; 3];
+        let job = HmmJobV1 {
+            abi_version: ABI_VERSION,
+            struct_size: mem::size_of::<HmmJobV1>() as u32,
+            graph: ptr::null_mut(),
+            conditioning_job: ptr::null_mut(),
+            haplotypes: ptr::null(),
+            haplotypes_length: 0,
+            haplotype_stride: 1,
+            centimorgans: centimorgans.as_ptr(),
+            centimorgans_length: centimorgans.len(),
+            recombination: recombination.as_ptr(),
+            recombination_length: recombination.len(),
+            rare_alleles: rare_alleles.as_ptr(),
+            rare_alleles_length: rare_alleles.len(),
+            effective_population_size: 15_000,
+            total_haplotypes: 16,
+            emission_match: f64::from(0.9999f32),
+            emission_mismatch: f64::from(0.0001f32),
+            transition_probabilities: transitions.as_mut_ptr(),
+            transition_probabilities_length: transitions.len(),
+            missing_probabilities: ptr::null_mut(),
+            missing_probabilities_length: 0,
+        };
+        let first = JobWindowInputs {
+            job: &job,
+            variants: &variants,
+            ambiguous: &[],
+            segment_lengths: &segment_lengths,
+            diplotypes: &diplotypes,
+            subset_haplotypes: &haplotypes,
+            subset_stride: 1,
+            conditioning_haplotypes: 8,
+            locus_offset: 0,
+            window: GenotypeWindowV1 {
+                start_locus: 0,
+                start_segment: 0,
+                start_ambiguous: 0,
+                start_missing: 0,
+                start_transition: 1,
+                stop_locus: 1,
+                stop_segment: 1,
+                stop_ambiguous: -1,
+                stop_missing: -1,
+                stop_transition: 1,
+            },
+        };
+        let second = JobWindowInputs {
+            job: &job,
+            variants: &variants,
+            ambiguous: &[],
+            segment_lengths: &segment_lengths,
+            diplotypes: &diplotypes,
+            subset_haplotypes: &haplotypes,
+            subset_stride: 1,
+            conditioning_haplotypes: 8,
+            locus_offset: 1,
+            window: GenotypeWindowV1 {
+                start_locus: 1,
+                start_segment: 1,
+                start_ambiguous: 0,
+                start_missing: 0,
+                start_transition: 2,
+                stop_locus: 2,
+                stop_segment: 2,
+                stop_ambiguous: -1,
+                stop_missing: -1,
+                stop_transition: 2,
+            },
+        };
+        let mut scratch = Vec::new();
+        let mut alpha_locus = Vec::new();
+        let mut validation = None;
+
+        reset_double_graph_validation_scans();
+        assert_eq!(
+            unsafe {
+                run_job_window_double(&first, &mut scratch, &mut alpha_locus, &mut validation)
+            },
+            Ok(0)
+        );
+        assert_eq!(
+            unsafe {
+                run_job_window_double(&second, &mut scratch, &mut alpha_locus, &mut validation)
+            },
+            Ok(0)
+        );
+        assert_eq!(transitions, [1.0; 3]);
+        assert_eq!(double_graph_validation_scans(), 1);
     }
 
     #[test]
@@ -3455,14 +3678,28 @@ mod tests {
         };
         let mut scratch = Vec::new();
         let mut alpha_locus = Vec::new();
+        let mut double_validation = None;
 
-        let double_outcome =
-            unsafe { run_job_window_double(&inputs, &mut scratch, &mut alpha_locus) }.unwrap();
+        let double_outcome = unsafe {
+            run_job_window_double(
+                &inputs,
+                &mut scratch,
+                &mut alpha_locus,
+                &mut double_validation,
+            )
+        }
+        .unwrap();
         assert_eq!(double_outcome, -2);
 
-        let recovered =
-            unsafe { run_job_window_extended_precision(&inputs, &mut scratch, &mut alpha_locus) }
-                .unwrap();
+        let recovered = unsafe {
+            run_job_window_extended_precision(
+                &inputs,
+                &mut scratch,
+                &mut alpha_locus,
+                &mut double_validation,
+            )
+        }
+        .unwrap();
         assert_eq!(
             recovered,
             ExtendedPrecisionOutcome {
@@ -3531,6 +3768,7 @@ mod tests {
         };
         let mut scratch = Vec::new();
         let mut alpha_locus = Vec::new();
+        let mut double_validation = None;
         let double_inputs = JobWindowInputs {
             job: &job,
             variants: &variants,
@@ -3544,7 +3782,14 @@ mod tests {
             window,
         };
         assert_eq!(
-            unsafe { run_job_window_double(&double_inputs, &mut scratch, &mut alpha_locus) },
+            unsafe {
+                run_job_window_double(
+                    &double_inputs,
+                    &mut scratch,
+                    &mut alpha_locus,
+                    &mut double_validation,
+                )
+            },
             Ok(0)
         );
 
@@ -3643,6 +3888,86 @@ mod tests {
         assert_eq!(status, STATUS_INVALID_DIMENSIONS);
         assert_eq!(outcome, 77);
         assert_eq!(transitions, before);
+    }
+
+    #[test]
+    fn public_double_abi_revalidates_unselected_graph_tail() {
+        let mut variants = [0u8];
+        let lengths = [1u16, 1];
+        let diplotypes = [1u64, 1];
+        let haplotypes = [0u8];
+        let centimorgans = [0.0f32, 0.01];
+        let recombination = [0.01f32];
+        let rare_alleles = [-1i8; 2];
+        let mut transitions = [0.0f64; 2];
+        let layout = scratch_layout(8, 1, 0).unwrap();
+        let mut scratch = vec![0.0f64; layout.total];
+        let mut alpha_locus = [0i32; 1];
+        let parameters = HmmSegmentDoubleV1 {
+            abi_version: ABI_VERSION,
+            struct_size: mem::size_of::<HmmSegmentDoubleV1>() as u32,
+            variants: variants.as_ptr(),
+            variants_length: variants.len(),
+            ambiguous: ptr::null(),
+            ambiguous_length: 0,
+            segment_lengths: lengths.as_ptr(),
+            segment_lengths_length: lengths.len(),
+            diplotypes: diplotypes.as_ptr(),
+            diplotypes_length: diplotypes.len(),
+            haplotypes: haplotypes.as_ptr(),
+            haplotypes_length: haplotypes.len(),
+            haplotype_stride: 1,
+            conditioning_haplotypes: 8,
+            locus_offset: 0,
+            centimorgans: centimorgans.as_ptr(),
+            centimorgans_length: centimorgans.len(),
+            recombination: recombination.as_ptr(),
+            recombination_length: recombination.len(),
+            rare_alleles: rare_alleles.as_ptr(),
+            rare_alleles_length: rare_alleles.len(),
+            effective_population_size: 15_000,
+            total_haplotypes: 16,
+            emission_match: f64::from(0.9999f32),
+            emission_mismatch: f64::from(0.0001f32),
+            segment_first: 0,
+            segment_last: 0,
+            locus_first: 0,
+            locus_last: 0,
+            ambiguous_first: 0,
+            ambiguous_last: -1,
+            missing_first: 0,
+            missing_last: -1,
+            transition_first: 1,
+            transition_last: 0,
+            transition_probabilities: transitions.as_mut_ptr(),
+            transition_probabilities_length: transitions.len(),
+            missing_probabilities: ptr::null_mut(),
+            missing_probabilities_length: 0,
+            scratch: scratch.as_mut_ptr(),
+            scratch_length: scratch.len(),
+            alpha_locus_scratch: alpha_locus.as_mut_ptr(),
+            alpha_locus_scratch_length: alpha_locus.len(),
+        };
+
+        reset_double_graph_validation_scans();
+        let mut outcome = i32::MIN;
+        let status = unsafe { shapeit_hmm_run_segment_double_v1(&parameters, &mut outcome) };
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(outcome, 0);
+        assert_eq!(double_graph_validation_scans(), 1);
+
+        // Turn the unselected second locus into a missing genotype. A cached
+        // prefix would overlook the newly required missing-probability block.
+        variants[0] = 0x10;
+        assert_eq!(variants[0], 0x10);
+        transitions.copy_from_slice(&[7.0, 8.0]);
+        let before = transitions;
+        outcome = 77;
+        let status = unsafe { shapeit_hmm_run_segment_double_v1(&parameters, &mut outcome) };
+        assert_eq!(status, STATUS_OUT_OF_BOUNDS);
+        assert_eq!(outcome, 77);
+        assert_eq!(transitions, before);
+        assert_eq!(double_graph_validation_scans(), 2);
     }
 }
 
