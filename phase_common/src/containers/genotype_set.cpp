@@ -51,7 +51,7 @@ void genotype_set::imputeMonomorphic(variant_map & V) {
 	unsigned int n_imputed_genotypes = 0;
 	for (unsigned int v = 0 ; v < V.size() ; v ++) {
 		if (V.vec_pos[v]->isMonomorphic()) {
-			bool uallele = (V.vec_pos[v]->cref)?false:true;
+			const bool uallele = V.vec_pos[v]->calt != 0;
 			for (unsigned int i = 0 ; i < vecG.size() ; i ++) {
 				VAR_SET_HOM(MOD2(v), vecG[i]->Variants[DIV2(v)]);
 				uallele?VAR_SET_HAP0(MOD2(v), vecG[i]->Variants[DIV2(v)]):VAR_CLR_HAP0(MOD2(v), vecG[i]->Variants[DIV2(v)]);
