@@ -36,6 +36,7 @@ public:
 
 	static float ee;
 	static float ed;
+	static constexpr float NO_HMM_EVIDENCE = -2.0f;
 
 	rare_genotype(uint32_t _idx, bool _het, bool _mis, bool _al0, bool _al1, bool _pha) : sparse_genotype(_idx, _het,  _mis, _al0, _al1, _pha) {
 		if (!pha && al0 != al1) {
@@ -46,6 +47,15 @@ public:
 
 	rare_genotype(uint32_t _val) : sparse_genotype(_val) {
 	}	
+
+	bool hasNoHmmEvidence() const {
+		return prob == NO_HMM_EVIDENCE;
+	}
+
+	void markNoHmmEvidence() {
+		prob = NO_HMM_EVIDENCE;
+		pha = 0;
+	}
 	
 	void randomize() {
 		if (!pha) {

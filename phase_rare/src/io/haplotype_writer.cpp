@@ -95,7 +95,8 @@ void haplotype_writer::writeHaplotypesVCF(std::string foutput, std::string finpu
 
 	for (int32_t vt = 0, vs = 0, vr = 0 ; vt < V.sizeFull() ; vt ++) {
 
-		if (V.vec_full[vt]->bp >= input_start && V.vec_full[vt]->bp <= input_stop) {
+		const bool rejected = V.vec_full[vt]->type == VARTYPE_RARE && G.rejected_rare_sites[vr];
+		if (V.vec_full[vt]->bp >= input_start && V.vec_full[vt]->bp <= input_stop && !rejected) {
 
 			//Variant informations
 			bcf_clear1(rec);
@@ -165,8 +166,10 @@ void haplotype_writer::writeHaplotypesVCF(std::string foutput, std::string finpu
 	case OFILE_BCFC: vrb.bullet("BCF writing [Compressed / N=" + stb.str(G.n_samples) + " / L=" + stb.str(V.sizeFull()) + "] (" + stb.str(tac.rel_time()*0.001, 2) + "s)"); break;
 	}
 
-	vrb.bullet("Indexing ["+foutput + "]");
-	if (bcf_index_build3(foutput.c_str(), NULL, 14, nthreads) < 0) vrb.error("Fail to index file");
+	if (file_type != OFILE_VCFU) {
+		vrb.bullet("Indexing ["+foutput + "]");
+		if (bcf_index_build3(foutput.c_str(), NULL, 14, nthreads) < 0) vrb.error("Fail to index file");
+	}
 }
 
 
@@ -192,7 +195,8 @@ void haplotype_writer::writeHaplotypesXCF(std::string foutput, std::string finpu
 	//Write records
 	uint32_t count_alt = 0, count_tot = 0, n_sparse = 0;
 	for (int32_t vt = 0, vs = 0, vr = 0 ; vt < V.sizeFull() ; vt ++) {
-		if (V.vec_full[vt]->bp >= input_start && V.vec_full[vt]->bp <= input_stop) {
+		const bool rejected = V.vec_full[vt]->type == VARTYPE_RARE && G.rejected_rare_sites[vr];
+		if (V.vec_full[vt]->bp >= input_start && V.vec_full[vt]->bp <= input_stop && !rejected) {
 
 			// Fill-up buffers
 			count_alt = 0;
@@ -265,5 +269,3 @@ void haplotype_writer::writeHaplotypesXCF(std::string foutput, std::string finpu
 	if (bcf_index_build3(foutput.c_str(), NULL, 14, nthreads) < 0) vrb.error("Fail to index file");
 
 }
-
-

@@ -26,6 +26,7 @@ using namespace std;
 
 void genotype_set::phaseLiAndStephens(uint32_t vr, uint32_t hap, aligned_vector32 < float > & alphaXbeta_prev, aligned_vector32 < float > & alphaXbeta_curr, vector < uint32_t > & H, float threshold) {
 	float p[2] = { 0.0f };
+	float total_weight = 0.0f;
 
 	thread_local vector < uint32_t > carrier_epoch;
 	thread_local vector < uint8_t > carrier_state;
@@ -52,6 +53,9 @@ void genotype_set::phaseLiAndStephens(uint32_t vr, uint32_t hap, aligned_vector3
 
 	for (uint32_t k = 0 ; k < H.size() ; ++k) {
 		const float weight = alphaXbeta_prev[k] * 0.5f + alphaXbeta_curr[k] * 0.5f;
+		if (!isfinite(weight) || weight < 0.0f)
+			vrb.error("Invalid Li-Stephens conditioning weight at rare variant " + stb.str(vr));
+		total_weight += weight;
 		const uint32_t individual = H[k] >> 1;
 		if (carrier_epoch[individual] != current_epoch)
 			p[major_alleles[vr]] += weight;
@@ -60,16 +64,43 @@ void genotype_set::phaseLiAndStephens(uint32_t vr, uint32_t hap, aligned_vector3
 	}
 
 	assert(tidx>=0);
-	assert((p[0]+p[1])>=0);
+	if (!isfinite(total_weight) || total_weight <= 0.0f)
+		vrb.error("Nonpositive Li-Stephens conditioning weight at rare variant " + stb.str(vr));
+	const float conditioning_mass = p[0] + p[1];
+	if (!isfinite(conditioning_mass) || conditioning_mass < 0.0f)
+		vrb.error("Invalid Li-Stephens conditioning mass at rare variant " + stb.str(vr));
+	// The selected states provide no allele evidence when all their genotypes
+	// are missing. Mark the site for whole-record omission rather than inventing
+	// haplotypes from data outside the configured conditioning set.
+	rare_genotype & target = GRvar_genotypes[vr][tidx];
+	if (conditioning_mass == 0.0f) {
+		target.markNoHmmEvidence();
+		bool marked = false;
+		for (rare_genotype & genotype : GRind_genotypes[target.idx]) {
+			if (genotype.idx == vr) {
+				genotype.markNoHmmEvidence();
+				marked = true;
+				break;
+			}
+		}
+		assert(marked);
+		return;
+	}
+	// If the other target haplotype had no evidence, avoid a partial update; the
+	// whole site will be omitted after all workers finish.
+	if (target.hasNoHmmEvidence()) return;
+	const float allele1_probability = p[1] / conditioning_mass;
+	if (!isfinite(allele1_probability) || allele1_probability < 0.0f || allele1_probability > 1.0f)
+		vrb.error("Invalid Li-Stephens allele probability at rare variant " + stb.str(vr));
 
 	if (!GRvar_genotypes[vr][tidx].pha) {
 		if (hap%2 == 0) {
 			assert(GRvar_genotypes[vr][tidx].prob < 0.0f);
-			GRvar_genotypes[vr][tidx].prob = p[1] / (p[0] + p[1]);
+			GRvar_genotypes[vr][tidx].prob = allele1_probability;
 		} else {
 			assert(GRvar_genotypes[vr][tidx].prob >= 0.0f);
-			if (haploids[GRvar_genotypes[vr][tidx].idx]) GRvar_genotypes[vr][tidx].impute(GRvar_genotypes[vr][tidx].prob, p[1] / (p[0] + p[1]));
-			else GRvar_genotypes[vr][tidx].phase(GRvar_genotypes[vr][tidx].prob, p[1] / (p[0] + p[1]));
+			if (haploids[GRvar_genotypes[vr][tidx].idx]) GRvar_genotypes[vr][tidx].impute(GRvar_genotypes[vr][tidx].prob, allele1_probability);
+			else GRvar_genotypes[vr][tidx].phase(GRvar_genotypes[vr][tidx].prob, allele1_probability);
 			assert(!isnan(GRvar_genotypes[vr][tidx].prob));
 			assert(!isinf(GRvar_genotypes[vr][tidx].prob));
 			if (GRvar_genotypes[vr][tidx].het && GRvar_genotypes[vr][tidx].prob < threshold) {
@@ -113,7 +144,7 @@ void genotype_set::phaseCoalescentViterbi(uint32_t ind, vector < int32_t > & pat
 	 //
 	for (int32_t vr = 0 ; vr < GRind_genotypes[ind].size() ; vr ++) {
 		uint32_t idx = GRind_genotypes[ind][vr].idx;
-		if (!GRind_genotypes[ind][vr].pha) {
+		if (!GRind_genotypes[ind][vr].pha && !GRind_genotypes[ind][vr].hasNoHmmEvidence()) {
 			int32_t index = MAP_R2S[idx];
 
 			float w0, w1;

@@ -49,6 +49,7 @@ void genotype_set::clear() {
 	nhets_families = 0;
 	nhets_imputation = 0;
 	nhets_coalescent = 0;
+	rejected_rare_sites.clear();
 }
 
 void genotype_set::imputeMonomorphic() {
@@ -77,6 +78,7 @@ void genotype_set::allocate(variant_map & V, uint32_t _n_samples, uint32_t _n_sc
 	GRind_genotypes = vector < vector < rare_genotype > > (n_samples);
 	MAP_R2S = vector < uint32_t > (n_rare_variants);
 	major_alleles = vector < bool > (n_rare_variants, false);
+	rejected_rare_sites = vector < bool > (n_rare_variants, false);
 	for (int32_t r = 0 ; r < V.sizeRare() ; r ++) major_alleles[r] = !V.vec_rare[r]->minor;
 
 	//Mapping
@@ -115,6 +117,18 @@ void genotype_set::fillup_by_transpose_V2I() {
 void genotype_set::merge_by_transpose_I2V() {
 	tac.clock();
 
+	// A single target without called conditioning evidence rejects the entire
+	// site. Determine this after all workers finish, avoiding shared writes.
+	fill(rejected_rare_sites.begin(), rejected_rare_sites.end(), false);
+	for (uint32_t vr = 0 ; vr < n_rare_variants ; ++vr) {
+		for (const rare_genotype & genotype : GRvar_genotypes[vr]) {
+			if (genotype.hasNoHmmEvidence()) {
+				rejected_rare_sites[vr] = true;
+				break;
+			}
+		}
+	}
+
 	//Merge
 	nhets_coalescent = 0;
 	nhets_imputation = 0;
@@ -125,7 +139,9 @@ void genotype_set::merge_by_transpose_I2V() {
 			bool found = false;
 			for (int32_t e = 0 ; e < GRvar_genotypes[var_idx].size() && !found; e ++ ) {
 				if (GRvar_genotypes[var_idx][e].idx == i) {
-					if (!GRvar_genotypes[var_idx][e].pha) {
+					if (rejected_rare_sites[var_idx]) {
+						// The site is omitted, so do not merge or count partial results.
+					} else if (!GRvar_genotypes[var_idx][e].pha) {
 						GRvar_genotypes[var_idx][e].pha = 1;
 						GRvar_genotypes[var_idx][e].al0 = GRind_genotypes[i][r].al0;
 						GRvar_genotypes[var_idx][e].al1 = GRind_genotypes[i][r].al1;

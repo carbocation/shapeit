@@ -58,6 +58,7 @@ public:
 
 	//Genotypes at rare unphased variants
 	std::vector < bool > major_alleles;
+	std::vector < bool > rejected_rare_sites;
 	std::vector < std::vector < rare_genotype > > GRvar_genotypes;
 	std::vector < std::vector < rare_genotype > > GRind_genotypes;
 
