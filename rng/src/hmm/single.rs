@@ -11,6 +11,9 @@ use core::arch::x86_64::{
     _mm256_storeu_ps, _mm256_xor_si256, _mm_loadu_ps, _mm_set1_ps, _mm_setr_ps, _mm_storeu_ps,
 };
 
+#[cfg(target_arch = "aarch64")]
+mod neon;
+
 #[cfg(target_arch = "x86_64")]
 #[inline]
 fn intel_family_model(eax: u32) -> (u32, u32) {
@@ -661,7 +664,66 @@ impl SingleEngine<'_> {
             return;
         }
 
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        {
+            let factor = transition / (self.conditioning_haplotypes as f32 * self.prob_sum_t);
+            let stay_factor = (1.0 - transition) / self.prob_sum_t;
+            let row = relative_locus + self.locus_offset;
+            let allele_bytes = unsafe { self.haplotypes.as_ptr().add(row * self.haplotype_stride) };
+            let sums = unsafe {
+                match self.prob_haps {
+                    1 => neon::run_compressed::<1, AMBIGUOUS>(
+                        self.prob.as_mut_ptr(),
+                        self.conditioning_haplotypes,
+                        self.prob_sum_h.as_ptr(),
+                        allele_bytes,
+                        factor,
+                        stay_factor,
+                        self.mismatch,
+                        genotype_allele,
+                        ambiguous_code,
+                    ),
+                    2 => neon::run_compressed::<2, AMBIGUOUS>(
+                        self.prob.as_mut_ptr(),
+                        self.conditioning_haplotypes,
+                        self.prob_sum_h.as_ptr(),
+                        allele_bytes,
+                        factor,
+                        stay_factor,
+                        self.mismatch,
+                        genotype_allele,
+                        ambiguous_code,
+                    ),
+                    4 => neon::run_four::<AMBIGUOUS>(
+                        self.prob.as_mut_ptr(),
+                        self.conditioning_haplotypes,
+                        self.prob_sum_h.as_ptr(),
+                        allele_bytes,
+                        factor,
+                        stay_factor,
+                        self.mismatch,
+                        genotype_allele,
+                        ambiguous_code,
+                    ),
+                    HAPLOTYPES => neon::run_full::<AMBIGUOUS>(
+                        self.prob.as_mut_ptr(),
+                        self.conditioning_haplotypes,
+                        self.prob_sum_h.as_ptr(),
+                        allele_bytes,
+                        factor,
+                        stay_factor,
+                        self.mismatch,
+                        genotype_allele,
+                        ambiguous_code,
+                    ),
+                    _ => unreachable!("invalid compressed HMM lane count"),
+                }
+            };
+            self.update_total(&sums, self.prob_haps);
+            return;
+        }
+
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             let haplotypes = self.prob_haps;
             let factor = transition / (self.conditioning_haplotypes as f32 * self.prob_sum_t);
@@ -1710,7 +1772,11 @@ impl SingleEngine<'_> {
         unsafe {
             self.collapse_avx2::<0>(relative_locus, genotype_allele, 0, transition);
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            self.collapse_neon::<0>(relative_locus, genotype_allele, 0, transition);
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         self.collapse(relative_locus, Some(genotype_allele), None, transition);
     }
 
@@ -1725,7 +1791,11 @@ impl SingleEngine<'_> {
         unsafe {
             self.collapse_avx2::<1>(relative_locus, false, ambiguous_code, transition);
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            self.collapse_neon::<1>(relative_locus, false, ambiguous_code, transition);
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         self.collapse(relative_locus, None, Some(ambiguous_code), transition);
     }
 
@@ -1734,11 +1804,15 @@ impl SingleEngine<'_> {
         unsafe {
             self.collapse_avx2::<2>(0, false, 0, transition);
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            self.collapse_neon::<2>(0, false, 0, transition);
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         self.collapse(0, None, None, transition);
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     fn collapse(
         &mut self,
         relative_locus: usize,
@@ -1771,6 +1845,38 @@ impl SingleEngine<'_> {
                 sums[h] += value;
             }
         }
+        self.update_total(&sums, HAPLOTYPES);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe fn collapse_neon<const KIND: u8>(
+        &mut self,
+        relative_locus: usize,
+        genotype_allele: bool,
+        ambiguous_code: u8,
+        transition: f32,
+    ) {
+        debug_assert!(KIND <= 2);
+        debug_assert_eq!(self.prob_haps, HAPLOTYPES);
+        let transferred = transition / self.conditioning_haplotypes as f32;
+        let stay_factor = (1.0 - transition) / self.prob_sum_t;
+        let allele_bytes = if KIND < 2 {
+            let row = relative_locus + self.locus_offset;
+            self.haplotypes.as_ptr().add(row * self.haplotype_stride)
+        } else {
+            core::ptr::null()
+        };
+        let sums = neon::collapse::<KIND>(
+            self.prob.as_mut_ptr(),
+            self.prob_sum_k.as_ptr(),
+            self.conditioning_haplotypes,
+            allele_bytes,
+            transferred,
+            stay_factor,
+            self.mismatch,
+            genotype_allele,
+            ambiguous_code,
+        );
         self.update_total(&sums, HAPLOTYPES);
     }
 
@@ -1983,7 +2089,20 @@ impl SingleEngine<'_> {
                 };
             }
 
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(target_arch = "aarch64")]
+            {
+                return unsafe {
+                    self.transition_haplotypes_full_neon(
+                        alpha_start,
+                        alpha_sum_start,
+                        alpha_total,
+                        transition,
+                        stay_factor,
+                    )
+                };
+            }
+
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
             {
                 let mut total = 0.0f32;
                 for h1 in 0..HAPLOTYPES {
@@ -2015,6 +2134,29 @@ impl SingleEngine<'_> {
         self.sum_h_probs.is_nan()
             || self.sum_h_probs.is_infinite()
             || self.sum_h_probs < f32::MIN_POSITIVE
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe fn transition_haplotypes_full_neon(
+        &mut self,
+        alpha_start: usize,
+        alpha_sum_start: usize,
+        alpha_total: f32,
+        transition: f32,
+        stay_factor: f32,
+    ) -> bool {
+        let total = neon::transition_full(
+            self.alpha.as_ptr().add(alpha_start),
+            self.prob.as_ptr(),
+            self.alpha_sum.as_ptr().add(alpha_sum_start),
+            self.conditioning_haplotypes,
+            alpha_total,
+            transition,
+            stay_factor,
+            self.h_probs.as_mut_ptr(),
+        );
+        self.sum_h_probs = total;
+        total.is_nan() || total.is_infinite() || total < f32::MIN_POSITIVE
     }
 
     #[cfg(target_arch = "x86_64")]
