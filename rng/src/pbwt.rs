@@ -150,7 +150,124 @@ struct SelectValidation<'a> {
     neighbors_length: usize,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct PbwtSelectJobV1 {
+    pub(crate) haplotypes: *const u8,
+    pub(crate) haplotypes_length: usize,
+    pub(crate) haplotype_stride: usize,
+    pub(crate) site_count: usize,
+    pub(crate) haplotype_count: usize,
+    pub(crate) target_individual_count: usize,
+    pub(crate) evaluated_sites: *const u8,
+    pub(crate) evaluated_sites_length: usize,
+    pub(crate) selected_sites: *const u8,
+    pub(crate) selected_sites_length: usize,
+    pub(crate) site_groups: *const i32,
+    pub(crate) site_groups_length: usize,
+    pub(crate) group_count: usize,
+    pub(crate) site_chunks: *const i32,
+    pub(crate) site_chunks_length: usize,
+    pub(crate) chunk_starts: *const i32,
+    pub(crate) chunk_count: usize,
+    pub(crate) depth: usize,
+    pub(crate) ibd2: *const Ibd2TracksV1,
+    pub(crate) neighbors: *mut i32,
+    pub(crate) neighbors_length: usize,
+}
+
+// Inputs remain immutable for one selection job and each worker writes only
+// the group slabs assigned to its chunk.
+unsafe impl Sync for PbwtSelectJobV1 {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PbwtSelectChunkLayout {
+    buffer_start: usize,
+    last_current: usize,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct PbwtSelectJobLayout {
+    haplotypes_address: usize,
+    haplotypes_length: usize,
+    haplotype_stride: usize,
+    site_count: usize,
+    haplotype_count: usize,
+    target_individual_count: usize,
+    evaluated_sites_address: usize,
+    evaluated_sites_length: usize,
+    selected_sites_address: usize,
+    selected_sites_length: usize,
+    site_groups_address: usize,
+    site_groups_length: usize,
+    group_count: usize,
+    site_chunks_address: usize,
+    site_chunks_length: usize,
+    chunk_starts_address: usize,
+    chunk_count: usize,
+    depth: usize,
+    ibd2_address: usize,
+    neighbors_address: usize,
+    neighbors_length: usize,
+    target_haplotype_count: usize,
+    neighbor_slab: usize,
+    chunks: Vec<PbwtSelectChunkLayout>,
+}
+
+impl PbwtSelectJobLayout {
+    #[inline]
+    fn matches(&self, parameters: &PbwtSelectJobV1) -> bool {
+        self.haplotypes_address == parameters.haplotypes as usize
+            && self.haplotypes_length == parameters.haplotypes_length
+            && self.haplotype_stride == parameters.haplotype_stride
+            && self.site_count == parameters.site_count
+            && self.haplotype_count == parameters.haplotype_count
+            && self.target_individual_count == parameters.target_individual_count
+            && self.evaluated_sites_address == parameters.evaluated_sites as usize
+            && self.evaluated_sites_length == parameters.evaluated_sites_length
+            && self.selected_sites_address == parameters.selected_sites as usize
+            && self.selected_sites_length == parameters.selected_sites_length
+            && self.site_groups_address == parameters.site_groups as usize
+            && self.site_groups_length == parameters.site_groups_length
+            && self.group_count == parameters.group_count
+            && self.site_chunks_address == parameters.site_chunks as usize
+            && self.site_chunks_length == parameters.site_chunks_length
+            && self.chunk_starts_address == parameters.chunk_starts as usize
+            && self.chunk_count == parameters.chunk_count
+            && self.depth == parameters.depth
+            && self.ibd2_address == parameters.ibd2 as usize
+            && self.neighbors_address == parameters.neighbors as usize
+            && self.neighbors_length == parameters.neighbors_length
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static PBWT_SELECT_VALIDATION_SCANS: core::cell::Cell<usize> = const {
+        core::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+fn record_pbwt_select_validation_scan() {
+    PBWT_SELECT_VALIDATION_SCANS.with(|scans| scans.set(scans.get() + 1));
+}
+
+#[cfg(not(test))]
+#[inline]
+fn record_pbwt_select_validation_scan() {}
+
+#[cfg(test)]
+pub(crate) fn reset_pbwt_select_validation_scans() {
+    PBWT_SELECT_VALIDATION_SCANS.with(|scans| scans.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn pbwt_select_validation_scans() -> usize {
+    PBWT_SELECT_VALIDATION_SCANS.with(core::cell::Cell::get)
+}
+
 fn validate_select_layout(parameters: SelectValidation<'_>) -> Result<SelectLayout, u32> {
+    record_pbwt_select_validation_scan();
     let SelectValidation {
         haplotypes_length,
         haplotype_stride,
@@ -247,6 +364,203 @@ fn validate_select_layout(parameters: SelectValidation<'_>) -> Result<SelectLayo
         last_current,
         neighbor_slab,
     })
+}
+
+/// Validate all immutable layout shared by the PBWT chunk workers and cache
+/// each chunk's final locus. `selected_sites` is an output of the immediately
+/// following site-selection step, so only its identity and extent are checked
+/// here; that step guarantees its binary contents before workers can observe it.
+pub(crate) unsafe fn validate_pbwt_select_job_v1(
+    parameters: &PbwtSelectJobV1,
+) -> Result<PbwtSelectJobLayout, u32> {
+    record_pbwt_select_validation_scan();
+    if parameters.haplotypes.is_null()
+        || parameters.evaluated_sites.is_null()
+        || parameters.selected_sites.is_null()
+        || parameters.site_groups.is_null()
+        || parameters.site_chunks.is_null()
+        || parameters.chunk_starts.is_null()
+        || parameters.ibd2.is_null()
+        || parameters.neighbors.is_null()
+    {
+        return Err(STATUS_NULL_POINTER);
+    }
+    if parameters.site_count == 0
+        || parameters.haplotype_count == 0
+        || parameters.target_individual_count == 0
+        || parameters.haplotype_stride == 0
+        || parameters.group_count == 0
+        || parameters.chunk_count == 0
+        || parameters.depth == 0
+        || parameters.evaluated_sites_length != parameters.site_count
+        || parameters.selected_sites_length != parameters.site_count
+        || parameters.site_groups_length != parameters.site_count
+        || parameters.site_chunks_length != parameters.site_count
+    {
+        return Err(STATUS_INVALID_DIMENSIONS);
+    }
+    let ibd2 = &*parameters.ibd2;
+    if ibd2.individual_count() != parameters.target_individual_count || !ibd2.is_collapsed() {
+        return Err(STATUS_INVALID_DIMENSIONS);
+    }
+    let evaluated_sites = slice::from_raw_parts(
+        parameters.evaluated_sites,
+        parameters.evaluated_sites_length,
+    );
+    let site_groups = slice::from_raw_parts(parameters.site_groups, parameters.site_groups_length);
+    let site_chunks = slice::from_raw_parts(parameters.site_chunks, parameters.site_chunks_length);
+    let chunk_starts = slice::from_raw_parts(parameters.chunk_starts, parameters.chunk_count);
+    if evaluated_sites.iter().any(|&value| value > 1) {
+        return Err(STATUS_INVALID_DIMENSIONS);
+    }
+    for &group in site_groups {
+        if group < 0 || group as usize >= parameters.group_count {
+            return Err(STATUS_OUT_OF_BOUNDS);
+        }
+    }
+
+    let target_haplotype_count = parameters
+        .target_individual_count
+        .checked_mul(2)
+        .ok_or(STATUS_INTEGER_OVERFLOW)?;
+    let padded_haplotypes = parameters
+        .haplotype_stride
+        .checked_mul(8)
+        .ok_or(STATUS_INTEGER_OVERFLOW)?;
+    if target_haplotype_count > parameters.haplotype_count
+        || parameters.haplotype_count > padded_haplotypes
+        || parameters.haplotype_count > i32::MAX as usize
+    {
+        return Err(STATUS_INVALID_DIMENSIONS);
+    }
+    let required_haplotypes = parameters
+        .site_count
+        .checked_mul(parameters.haplotype_stride)
+        .ok_or(STATUS_INTEGER_OVERFLOW)?;
+    if required_haplotypes > parameters.haplotypes_length {
+        return Err(STATUS_OUT_OF_BOUNDS);
+    }
+    let neighbor_slab = parameters
+        .group_count
+        .checked_mul(target_haplotype_count)
+        .ok_or(STATUS_INTEGER_OVERFLOW)?;
+    let required_neighbors = parameters
+        .depth
+        .checked_add(1)
+        .and_then(|slabs| slabs.checked_mul(neighbor_slab))
+        .ok_or(STATUS_INTEGER_OVERFLOW)?;
+    if required_neighbors > parameters.neighbors_length {
+        return Err(STATUS_OUT_OF_BOUNDS);
+    }
+    let maximum_chunk = parameters
+        .chunk_count
+        .checked_sub(1)
+        .ok_or(STATUS_INVALID_DIMENSIONS)?;
+    let maximum_chunk = i32::try_from(maximum_chunk).map_err(|_| STATUS_INTEGER_OVERFLOW)?;
+
+    let mut first_current = vec![usize::MAX; parameters.chunk_count];
+    let mut last_current = vec![0usize; parameters.chunk_count];
+    let mut previous_chunk = -1i32;
+    for (locus, &site_chunk) in site_chunks.iter().enumerate() {
+        if site_chunk < 0 || site_chunk < previous_chunk || site_chunk > maximum_chunk {
+            return Err(STATUS_INVALID_DIMENSIONS);
+        }
+        previous_chunk = site_chunk;
+        let chunk = site_chunk as usize;
+        first_current[chunk] = first_current[chunk].min(locus);
+        last_current[chunk] = locus;
+    }
+    let mut chunks = Vec::with_capacity(parameters.chunk_count);
+    for chunk in 0..parameters.chunk_count {
+        let first = first_current[chunk];
+        if first == usize::MAX {
+            return Err(STATUS_INVALID_DIMENSIONS);
+        }
+        let start = chunk_starts[chunk];
+        if start < 0 {
+            return Err(STATUS_OUT_OF_BOUNDS);
+        }
+        let buffer_start = start as usize;
+        if buffer_start >= parameters.site_count || buffer_start > first {
+            return Err(STATUS_INVALID_DIMENSIONS);
+        }
+        chunks.push(PbwtSelectChunkLayout {
+            buffer_start,
+            last_current: last_current[chunk],
+        });
+    }
+
+    Ok(PbwtSelectJobLayout {
+        haplotypes_address: parameters.haplotypes as usize,
+        haplotypes_length: parameters.haplotypes_length,
+        haplotype_stride: parameters.haplotype_stride,
+        site_count: parameters.site_count,
+        haplotype_count: parameters.haplotype_count,
+        target_individual_count: parameters.target_individual_count,
+        evaluated_sites_address: parameters.evaluated_sites as usize,
+        evaluated_sites_length: parameters.evaluated_sites_length,
+        selected_sites_address: parameters.selected_sites as usize,
+        selected_sites_length: parameters.selected_sites_length,
+        site_groups_address: parameters.site_groups as usize,
+        site_groups_length: parameters.site_groups_length,
+        group_count: parameters.group_count,
+        site_chunks_address: parameters.site_chunks as usize,
+        site_chunks_length: parameters.site_chunks_length,
+        chunk_starts_address: parameters.chunk_starts as usize,
+        chunk_count: parameters.chunk_count,
+        depth: parameters.depth,
+        ibd2_address: parameters.ibd2 as usize,
+        neighbors_address: parameters.neighbors as usize,
+        neighbors_length: parameters.neighbors_length,
+        target_haplotype_count,
+        neighbor_slab,
+        chunks,
+    })
+}
+
+/// Execute one chunk using an iteration-scoped layout token. The token's
+/// identity check prevents accidental reuse with different caller buffers.
+pub(crate) unsafe fn pbwt_select_chunk_prevalidated_v1(
+    parameters: &PbwtSelectJobV1,
+    validation: &PbwtSelectJobLayout,
+    chunk: usize,
+) -> u32 {
+    if !validation.matches(parameters) {
+        return STATUS_INVALID_DIMENSIONS;
+    }
+    let chunk_layout = match validation.chunks.get(chunk) {
+        Some(value) => *value,
+        None => return STATUS_OUT_OF_BOUNDS,
+    };
+    let evaluated_sites = slice::from_raw_parts(
+        parameters.evaluated_sites,
+        parameters.evaluated_sites_length,
+    );
+    let selected_sites =
+        slice::from_raw_parts(parameters.selected_sites, parameters.selected_sites_length);
+    let site_groups = slice::from_raw_parts(parameters.site_groups, parameters.site_groups_length);
+    let site_chunks = slice::from_raw_parts(parameters.site_chunks, parameters.site_chunks_length);
+    let status = select_chunk(SelectParameters {
+        haplotypes: parameters.haplotypes,
+        haplotype_stride: parameters.haplotype_stride,
+        haplotype_count: parameters.haplotype_count,
+        target_haplotype_count: validation.target_haplotype_count,
+        evaluated_sites,
+        selected_sites,
+        site_groups,
+        site_chunks,
+        chunk: chunk as i32,
+        buffer_start: chunk_layout.buffer_start,
+        last_current: chunk_layout.last_current,
+        depth: parameters.depth,
+        ibd2: &*parameters.ibd2,
+        neighbors: parameters.neighbors,
+        neighbor_slab: validation.neighbor_slab,
+    });
+    match status {
+        Ok(()) => STATUS_OK,
+        Err(status) => status,
+    }
 }
 
 #[inline]
@@ -1370,6 +1684,77 @@ mod tests {
         };
         assert_eq!(status, STATUS_OK);
         assert_eq!(&neighbors[..8], &[2, 2, 2, 3, 1, 0, 1, 1]);
+    }
+
+    #[test]
+    fn public_select_chunk_revalidates_mutated_shared_tail() {
+        let haplotypes = [0x30u8, 0x50];
+        let evaluated = [1u8, 1];
+        let selected = [1u8, 1];
+        let mut groups = [0i32, 1];
+        let chunks = [0i32, 0];
+        let ibd2 = Ibd2TracksV1::new(2, &[0.0, 1.0]).unwrap();
+        let mut neighbors = [-1i32; 16];
+
+        reset_pbwt_select_validation_scans();
+        let status = unsafe {
+            shapeit_pbwt_select_chunk_v1(
+                haplotypes.as_ptr(),
+                haplotypes.len(),
+                1,
+                2,
+                4,
+                2,
+                evaluated.as_ptr(),
+                evaluated.len(),
+                selected.as_ptr(),
+                selected.len(),
+                groups.as_ptr(),
+                groups.len(),
+                2,
+                chunks.as_ptr(),
+                chunks.len(),
+                0,
+                0,
+                1,
+                &ibd2,
+                neighbors.as_mut_ptr(),
+                neighbors.len(),
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(pbwt_select_validation_scans(), 1);
+
+        groups[1] = 2;
+        let before = neighbors;
+        let status = unsafe {
+            shapeit_pbwt_select_chunk_v1(
+                haplotypes.as_ptr(),
+                haplotypes.len(),
+                1,
+                2,
+                4,
+                2,
+                evaluated.as_ptr(),
+                evaluated.len(),
+                selected.as_ptr(),
+                selected.len(),
+                groups.as_ptr(),
+                groups.len(),
+                2,
+                chunks.as_ptr(),
+                chunks.len(),
+                0,
+                0,
+                1,
+                &ibd2,
+                neighbors.as_mut_ptr(),
+                neighbors.len(),
+            )
+        };
+        assert_eq!(status, STATUS_OUT_OF_BOUNDS);
+        assert_eq!(neighbors, before);
+        assert_eq!(pbwt_select_validation_scans(), 2);
     }
 
     #[test]

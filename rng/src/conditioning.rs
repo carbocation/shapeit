@@ -134,6 +134,93 @@ struct ConditioningInputs<'a> {
     maximum_heterozygote_mismatch: f32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ConditioningSharedLayout {
+    variant_count: usize,
+    selected_sites_address: usize,
+    selected_sites_length: usize,
+    site_grouping_address: usize,
+    site_grouping_length: usize,
+    pbwt_neighbors_address: usize,
+    pbwt_neighbors_length: usize,
+    pbwt_depth: usize,
+    pbwt_group_count: usize,
+    target_individual_count: usize,
+    haplotype_count: usize,
+    haploid_individuals_address: usize,
+    haploid_individuals_length: usize,
+    haplotypes_address: usize,
+    haplotypes_length: usize,
+    haplotype_stride: usize,
+    pbwt_offset: usize,
+}
+
+impl ConditioningSharedLayout {
+    #[inline]
+    fn matches_inputs(&self, inputs: &ConditioningInputs<'_>) -> bool {
+        self.selected_sites_address == inputs.selected_sites.as_ptr() as usize
+            && self.selected_sites_length == inputs.selected_sites.len()
+            && self.site_grouping_address == inputs.site_grouping.as_ptr() as usize
+            && self.site_grouping_length == inputs.site_grouping.len()
+            && self.pbwt_neighbors_address == inputs.pbwt_neighbors.as_ptr() as usize
+            && self.pbwt_neighbors_length == inputs.pbwt_neighbors.len()
+            && self.pbwt_depth == inputs.pbwt_depth
+            && self.pbwt_group_count == inputs.pbwt_group_count
+            && self.target_individual_count == inputs.target_individual_count
+            && self.haplotype_count == inputs.haplotype_count
+            && self.haploid_individuals_address == inputs.haploid_individuals.as_ptr() as usize
+            && self.haploid_individuals_length == inputs.haploid_individuals.len()
+            && self.haplotypes_address == inputs.haplotypes.as_ptr() as usize
+            && self.haplotypes_length == inputs.haplotypes.len()
+            && self.haplotype_stride == inputs.haplotype_stride
+    }
+
+    #[inline]
+    fn matches_graph_build(&self, parameters: &ConditioningGraphBuildV1) -> bool {
+        self.selected_sites_address == parameters.selected_sites as usize
+            && self.selected_sites_length == parameters.selected_sites_length
+            && self.site_grouping_address == parameters.site_grouping as usize
+            && self.site_grouping_length == parameters.site_grouping_length
+            && self.pbwt_neighbors_address == parameters.pbwt_neighbors as usize
+            && self.pbwt_neighbors_length == parameters.pbwt_neighbors_length
+            && self.pbwt_depth == parameters.pbwt_depth
+            && self.pbwt_group_count == parameters.pbwt_group_count
+            && self.target_individual_count == parameters.target_individual_count
+            && self.haplotype_count == parameters.haplotype_count
+            && self.haploid_individuals_address == parameters.haploid_individuals as usize
+            && self.haploid_individuals_length == parameters.haploid_individuals_length
+            && self.haplotypes_address == parameters.haplotypes as usize
+            && self.haplotypes_length == parameters.haplotypes_length
+            && self.haplotype_stride == parameters.haplotype_stride
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static CONDITIONING_SHARED_VALIDATION_SCANS: core::cell::Cell<usize> = const {
+        core::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+fn record_conditioning_shared_validation_scan() {
+    CONDITIONING_SHARED_VALIDATION_SCANS.with(|scans| scans.set(scans.get() + 1));
+}
+
+#[cfg(not(test))]
+#[inline]
+fn record_conditioning_shared_validation_scan() {}
+
+#[cfg(test)]
+pub(crate) fn reset_conditioning_shared_validation_scans() {
+    CONDITIONING_SHARED_VALIDATION_SCANS.with(|scans| scans.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn conditioning_shared_validation_scans() -> usize {
+    CONDITIONING_SHARED_VALIDATION_SCANS.with(core::cell::Cell::get)
+}
+
 #[inline]
 unsafe fn const_slice<'a, T>(pointer: *const T, length: usize) -> &'a [T] {
     if length == 0 {
@@ -152,11 +239,99 @@ fn require_pointer<T>(pointer: *const T, length: usize) -> Result<(), u32> {
     }
 }
 
+fn validate_conditioning_shared(
+    inputs: &ConditioningInputs<'_>,
+) -> Result<ConditioningSharedLayout, u32> {
+    record_conditioning_shared_validation_scan();
+    if inputs.selected_sites.len() != inputs.site_grouping.len()
+        || inputs.target_individual >= inputs.target_individual_count
+        || inputs.target_individual_count == 0
+        || inputs.pbwt_depth == 0
+        || inputs.pbwt_group_count == 0
+        || inputs.haplotype_stride == 0
+        || inputs.haploid_individuals.len() < inputs.target_individual_count
+        || inputs.haplotype_count > i32::MAX as usize
+    {
+        return Err(STATUS_INVALID_DIMENSIONS);
+    }
+    if inputs.selected_sites.iter().any(|&value| value > 1)
+        || inputs.haploid_individuals[..inputs.target_individual_count]
+            .iter()
+            .any(|&value| value > 1)
+    {
+        return Err(STATUS_INVALID_DIMENSIONS);
+    }
+    for &group in inputs.site_grouping {
+        if group < 0 || group as usize >= inputs.pbwt_group_count {
+            return Err(STATUS_OUT_OF_BOUNDS);
+        }
+    }
+    let target_haplotype_count = inputs
+        .target_individual_count
+        .checked_mul(2)
+        .ok_or(STATUS_INTEGER_OVERFLOW)?;
+    if target_haplotype_count > inputs.haplotype_count {
+        return Err(STATUS_INVALID_DIMENSIONS);
+    }
+    let pbwt_offset = inputs
+        .pbwt_group_count
+        .checked_mul(target_haplotype_count)
+        .ok_or(STATUS_INTEGER_OVERFLOW)?;
+    let required_neighbors = inputs
+        .pbwt_depth
+        .checked_mul(pbwt_offset)
+        .ok_or(STATUS_INTEGER_OVERFLOW)?;
+    if required_neighbors > inputs.pbwt_neighbors.len() {
+        return Err(STATUS_OUT_OF_BOUNDS);
+    }
+    let required_haplotypes = inputs
+        .haplotype_count
+        .checked_mul(inputs.haplotype_stride)
+        .ok_or(STATUS_INTEGER_OVERFLOW)?;
+    if required_haplotypes > inputs.haplotypes.len() {
+        return Err(STATUS_OUT_OF_BOUNDS);
+    }
+    Ok(ConditioningSharedLayout {
+        variant_count: inputs.selected_sites.len(),
+        selected_sites_address: inputs.selected_sites.as_ptr() as usize,
+        selected_sites_length: inputs.selected_sites.len(),
+        site_grouping_address: inputs.site_grouping.as_ptr() as usize,
+        site_grouping_length: inputs.site_grouping.len(),
+        pbwt_neighbors_address: inputs.pbwt_neighbors.as_ptr() as usize,
+        pbwt_neighbors_length: inputs.pbwt_neighbors.len(),
+        pbwt_depth: inputs.pbwt_depth,
+        pbwt_group_count: inputs.pbwt_group_count,
+        target_individual_count: inputs.target_individual_count,
+        haplotype_count: inputs.haplotype_count,
+        haploid_individuals_address: inputs.haploid_individuals.as_ptr() as usize,
+        haploid_individuals_length: inputs.haploid_individuals.len(),
+        haplotypes_address: inputs.haplotypes.as_ptr() as usize,
+        haplotypes_length: inputs.haplotypes.len(),
+        haplotype_stride: inputs.haplotype_stride,
+        pbwt_offset,
+    })
+}
+
 fn collect_conditioning_states(
     inputs: ConditioningInputs<'_>,
     fallback_rng: &mut LogicalRng,
     job: &mut ConditioningJobV1,
 ) -> Result<(), u32> {
+    let validation = validate_conditioning_shared(&inputs)?;
+    collect_conditioning_states_prevalidated(inputs, &validation, fallback_rng, job)
+}
+
+fn collect_conditioning_states_prevalidated(
+    inputs: ConditioningInputs<'_>,
+    validation: &ConditioningSharedLayout,
+    fallback_rng: &mut LogicalRng,
+    job: &mut ConditioningJobV1,
+) -> Result<(), u32> {
+    if !validation.matches_inputs(&inputs)
+        || inputs.target_individual >= validation.target_individual_count
+    {
+        return Err(STATUS_INVALID_DIMENSIONS);
+    }
     let ConditioningInputs {
         windows,
         selected_sites,
@@ -172,50 +347,7 @@ fn collect_conditioning_states(
         haplotype_stride,
         maximum_heterozygote_mismatch,
     } = inputs;
-    if selected_sites.len() != site_grouping.len()
-        || target_individual >= target_individual_count
-        || target_individual_count == 0
-        || pbwt_depth == 0
-        || pbwt_group_count == 0
-        || haplotype_stride == 0
-        || haploid_individuals.len() < target_individual_count
-        || haplotype_count > i32::MAX as usize
-    {
-        return Err(STATUS_INVALID_DIMENSIONS);
-    }
-    if selected_sites.iter().any(|&value| value > 1)
-        || haploid_individuals[..target_individual_count]
-            .iter()
-            .any(|&value| value > 1)
-    {
-        return Err(STATUS_INVALID_DIMENSIONS);
-    }
-    for &group in site_grouping {
-        if group < 0 || group as usize >= pbwt_group_count {
-            return Err(STATUS_OUT_OF_BOUNDS);
-        }
-    }
-    let target_haplotype_count = target_individual_count
-        .checked_mul(2)
-        .ok_or(STATUS_INTEGER_OVERFLOW)?;
-    if target_haplotype_count > haplotype_count {
-        return Err(STATUS_INVALID_DIMENSIONS);
-    }
-    let pbwt_offset = pbwt_group_count
-        .checked_mul(target_haplotype_count)
-        .ok_or(STATUS_INTEGER_OVERFLOW)?;
-    let required_neighbors = pbwt_depth
-        .checked_mul(pbwt_offset)
-        .ok_or(STATUS_INTEGER_OVERFLOW)?;
-    if required_neighbors > pbwt_neighbors.len() {
-        return Err(STATUS_OUT_OF_BOUNDS);
-    }
-    let required_haplotypes = haplotype_count
-        .checked_mul(haplotype_stride)
-        .ok_or(STATUS_INTEGER_OVERFLOW)?;
-    if required_haplotypes > haplotypes.len() {
-        return Err(STATUS_OUT_OF_BOUNDS);
-    }
+    let pbwt_offset = validation.pbwt_offset;
 
     let target_haplotype0 = target_individual * 2;
     let target_haplotype1 = target_haplotype0 + 1;
@@ -377,7 +509,14 @@ pub unsafe extern "C" fn shapeit_conditioning_job_build_v1(
     if parameters.is_null() || job.is_null() {
         return STATUS_NULL_POINTER;
     }
-    let parameters = &*parameters;
+    conditioning_job_build(&*parameters, job, None)
+}
+
+unsafe fn conditioning_job_build(
+    parameters: &ConditioningBuildV1,
+    job: *mut *mut ConditioningJobV1,
+    shared_validation: Option<&ConditioningSharedLayout>,
+) -> u32 {
     if parameters.abi_version != ABI_VERSION
         || parameters.struct_size < mem::size_of::<ConditioningBuildV1>()
     {
@@ -483,25 +622,31 @@ pub unsafe extern "C" fn shapeit_conditioning_job_build_v1(
         } else {
             &mut *(*job)
         };
-        if let Err(status) = collect_conditioning_states(
-            ConditioningInputs {
-                windows,
-                selected_sites,
-                site_grouping,
-                pbwt_neighbors,
-                pbwt_depth: parameters.pbwt_depth,
-                pbwt_group_count: parameters.pbwt_group_count,
-                target_individual: parameters.target_individual,
-                target_individual_count: parameters.target_individual_count,
-                haplotype_count: parameters.haplotype_count,
-                haploid_individuals,
-                haplotypes,
-                haplotype_stride: parameters.haplotype_stride,
-                maximum_heterozygote_mismatch: parameters.maximum_heterozygote_mismatch,
-            },
-            &mut fallback_rng,
-            target,
-        ) {
+        let inputs = ConditioningInputs {
+            windows,
+            selected_sites,
+            site_grouping,
+            pbwt_neighbors,
+            pbwt_depth: parameters.pbwt_depth,
+            pbwt_group_count: parameters.pbwt_group_count,
+            target_individual: parameters.target_individual,
+            target_individual_count: parameters.target_individual_count,
+            haplotype_count: parameters.haplotype_count,
+            haploid_individuals,
+            haplotypes,
+            haplotype_stride: parameters.haplotype_stride,
+            maximum_heterozygote_mismatch: parameters.maximum_heterozygote_mismatch,
+        };
+        let collected = match shared_validation {
+            Some(validation) => collect_conditioning_states_prevalidated(
+                inputs,
+                validation,
+                &mut fallback_rng,
+                target,
+            ),
+            None => collect_conditioning_states(inputs, &mut fallback_rng, target),
+        };
+        if let Err(status) = collected {
             return status;
         }
     }
@@ -509,6 +654,74 @@ pub unsafe extern "C" fn shapeit_conditioning_job_build_v1(
         *job = Box::into_raw(value);
     }
     STATUS_OK
+}
+
+/// Validate the target-independent buffers shared by every sample in one
+/// common-phasing iteration. The returned token is bound to their identities
+/// and dimensions and must not outlive the immutable borrow promised by the
+/// iteration ABI.
+pub(crate) unsafe fn validate_conditioning_graph_job_shared_v1(
+    parameters: &ConditioningGraphBuildV1,
+    variant_count: usize,
+) -> Result<ConditioningSharedLayout, u32> {
+    if parameters.abi_version != ABI_VERSION
+        || parameters.struct_size < mem::size_of::<ConditioningGraphBuildV1>()
+    {
+        return Err(STATUS_INVALID_DIMENSIONS);
+    }
+    for result in [
+        require_pointer(parameters.centimorgans, parameters.centimorgans_length),
+        require_pointer(parameters.selected_sites, parameters.selected_sites_length),
+        require_pointer(parameters.site_grouping, parameters.site_grouping_length),
+        require_pointer(parameters.pbwt_neighbors, parameters.pbwt_neighbors_length),
+        require_pointer(
+            parameters.haploid_individuals,
+            parameters.haploid_individuals_length,
+        ),
+        require_pointer(parameters.haplotypes, parameters.haplotypes_length),
+    ] {
+        result?;
+    }
+    if parameters.centimorgans_length < variant_count
+        || parameters.selected_sites_length != variant_count
+        || parameters.site_grouping_length != variant_count
+    {
+        return Err(STATUS_OUT_OF_BOUNDS);
+    }
+    let inputs = ConditioningInputs {
+        windows: Vec::new(),
+        selected_sites: const_slice(parameters.selected_sites, parameters.selected_sites_length),
+        site_grouping: const_slice(parameters.site_grouping, parameters.site_grouping_length),
+        pbwt_neighbors: const_slice(parameters.pbwt_neighbors, parameters.pbwt_neighbors_length),
+        pbwt_depth: parameters.pbwt_depth,
+        pbwt_group_count: parameters.pbwt_group_count,
+        target_individual: parameters.target_individual,
+        target_individual_count: parameters.target_individual_count,
+        haplotype_count: parameters.haplotype_count,
+        haploid_individuals: const_slice(
+            parameters.haploid_individuals,
+            parameters.haploid_individuals_length,
+        ),
+        haplotypes: const_slice(parameters.haplotypes, parameters.haplotypes_length),
+        haplotype_stride: parameters.haplotype_stride,
+        maximum_heterozygote_mismatch: parameters.maximum_heterozygote_mismatch,
+    };
+    let validation = validate_conditioning_shared(&inputs)?;
+    debug_assert_eq!(validation.variant_count, variant_count);
+    Ok(validation)
+}
+
+/// Build one sample job after its iteration-shared buffers were validated.
+/// Graph-local segment structure is still checked on every invocation.
+pub(crate) unsafe fn conditioning_graph_job_build_prevalidated_v1(
+    parameters: &ConditioningGraphBuildV1,
+    job: *mut *mut ConditioningJobV1,
+    shared_validation: &ConditioningSharedLayout,
+) -> u32 {
+    if job.is_null() {
+        return STATUS_NULL_POINTER;
+    }
+    conditioning_graph_job_build(parameters, job, Some(shared_validation))
 }
 
 #[no_mangle]
@@ -529,7 +742,14 @@ pub unsafe extern "C" fn shapeit_conditioning_graph_job_build_v1(
     if parameters.is_null() || job.is_null() {
         return STATUS_NULL_POINTER;
     }
-    let parameters = &*parameters;
+    conditioning_graph_job_build(&*parameters, job, None)
+}
+
+unsafe fn conditioning_graph_job_build(
+    parameters: &ConditioningGraphBuildV1,
+    job: *mut *mut ConditioningJobV1,
+    shared_validation: Option<&ConditioningSharedLayout>,
+) -> u32 {
     if parameters.abi_version != ABI_VERSION
         || parameters.struct_size < mem::size_of::<ConditioningGraphBuildV1>()
     {
@@ -546,6 +766,11 @@ pub unsafe extern "C" fn shapeit_conditioning_graph_job_build_v1(
         return STATUS_INVALID_DIMENSIONS;
     }
     let (variant_count, _, _) = graph.hmm_dimensions();
+    if shared_validation.is_some_and(|validation| {
+        validation.variant_count != variant_count || !validation.matches_graph_build(parameters)
+    }) {
+        return STATUS_INVALID_DIMENSIONS;
+    }
     if parameters.centimorgans_length < variant_count {
         return STATUS_OUT_OF_BOUNDS;
     }
@@ -627,7 +852,7 @@ pub unsafe extern "C" fn shapeit_conditioning_graph_job_build_v1(
         fallback_iteration: parameters.fallback_iteration,
         fallback_item: parameters.fallback_item,
     };
-    let status = shapeit_conditioning_job_build_v1(&build, job);
+    let status = conditioning_job_build(&build, job, shared_validation);
     if !(*job).is_null() {
         (**job).segment_start_centimorgans = segment_starts;
         (**job).segment_stop_centimorgans = segment_stops;
@@ -753,7 +978,7 @@ mod tests {
         let segment_lengths = [25u16; 4];
         let start_centimorgans = [0.0f64, 1.0, 2.0, 3.0];
         let stop_centimorgans = [0.9f64, 1.9, 2.9, 4.0];
-        let selected_sites = [0u8; 100];
+        let mut selected_sites = [0u8; 100];
         let site_grouping = [0i32; 100];
         let pbwt_neighbors = [-1i32; 2];
         let haploid_individuals = [0u8];
@@ -800,6 +1025,7 @@ mod tests {
             fallback_item: 0,
         };
         let mut job = ptr::null_mut();
+        reset_conditioning_shared_validation_scans();
         let status = unsafe { shapeit_conditioning_job_build_v1(&parameters, &mut job) };
         assert_eq!(status, STATUS_OK);
         assert!(!job.is_null());
@@ -807,6 +1033,14 @@ mod tests {
         let status = unsafe { shapeit_conditioning_job_build_v1(&parameters, &mut job) };
         assert_eq!(status, STATUS_OK);
         assert_eq!(job, original_job);
+        assert_eq!(conditioning_shared_validation_scans(), 2);
+
+        selected_sites[99] = 2;
+        assert_eq!(selected_sites[99], 2);
+        let status = unsafe { shapeit_conditioning_job_build_v1(&parameters, &mut job) };
+        assert_eq!(status, STATUS_INVALID_DIMENSIONS);
+        assert_eq!(job, original_job);
+        assert_eq!(conditioning_shared_validation_scans(), 3);
         let mut window = GenotypeWindowV1::default();
         let mut states = ptr::null();
         let mut states_length = 0usize;
@@ -830,5 +1064,78 @@ mod tests {
             [2, 3]
         );
         unsafe { shapeit_conditioning_job_free_v1(job) };
+    }
+
+    #[test]
+    fn public_graph_builder_revalidates_shared_buffers() {
+        let variants = [0u8];
+        let mut graph = ptr::null_mut();
+        let status = unsafe {
+            crate::genotype::shapeit_genotype_graph_create_v1(
+                variants.as_ptr(),
+                variants.len(),
+                1,
+                &mut graph,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+
+        let centimorgans = [0.0f64];
+        let mut selected_sites = [0u8];
+        let site_grouping = [0i32];
+        let pbwt_neighbors = [-1i32; 4];
+        let haploid_individuals = [0u8; 2];
+        let haplotypes = [0u8; 4];
+        let parameters = ConditioningGraphBuildV1 {
+            abi_version: ABI_VERSION,
+            struct_size: mem::size_of::<ConditioningGraphBuildV1>(),
+            graph,
+            centimorgans: centimorgans.as_ptr(),
+            centimorgans_length: centimorgans.len(),
+            minimum_window_centimorgans: 1.0,
+            selected_sites: selected_sites.as_ptr(),
+            selected_sites_length: selected_sites.len(),
+            site_grouping: site_grouping.as_ptr(),
+            site_grouping_length: site_grouping.len(),
+            pbwt_neighbors: pbwt_neighbors.as_ptr(),
+            pbwt_neighbors_length: pbwt_neighbors.len(),
+            pbwt_depth: 1,
+            pbwt_group_count: 1,
+            target_individual: 0,
+            target_individual_count: 2,
+            haplotype_count: 4,
+            haploid_individuals: haploid_individuals.as_ptr(),
+            haploid_individuals_length: haploid_individuals.len(),
+            haplotypes: haplotypes.as_ptr(),
+            haplotypes_length: haplotypes.len(),
+            haplotype_stride: 1,
+            maximum_heterozygote_mismatch: 0.75,
+            window_seed: 15_052_011,
+            window_domain: 2,
+            window_iteration: 3,
+            window_item: 0,
+            fallback_seed: 15_052_011,
+            fallback_domain: 8,
+            fallback_iteration: 3,
+            fallback_item: 0,
+        };
+        let mut job = ptr::null_mut();
+        reset_conditioning_shared_validation_scans();
+        let status = unsafe { shapeit_conditioning_graph_job_build_v1(&parameters, &mut job) };
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(conditioning_shared_validation_scans(), 1);
+        let original_job = job;
+
+        selected_sites[0] = 2;
+        assert_eq!(selected_sites[0], 2);
+        let status = unsafe { shapeit_conditioning_graph_job_build_v1(&parameters, &mut job) };
+        assert_eq!(status, STATUS_INVALID_DIMENSIONS);
+        assert_eq!(job, original_job);
+        assert_eq!(conditioning_shared_validation_scans(), 2);
+
+        unsafe {
+            shapeit_conditioning_job_free_v1(job);
+            crate::genotype::shapeit_genotype_graph_free_v1(graph);
+        }
     }
 }

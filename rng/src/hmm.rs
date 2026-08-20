@@ -13,7 +13,9 @@ use crate::bitmatrix::{
     shapeit_bitmatrix_transpose_v1,
 };
 use crate::conditioning::{
-    shapeit_conditioning_graph_job_build_v1, ConditioningGraphBuildV1, ConditioningJobV1,
+    conditioning_graph_job_build_prevalidated_v1, shapeit_conditioning_graph_job_build_v1,
+    validate_conditioning_graph_job_shared_v1, ConditioningGraphBuildV1, ConditioningJobV1,
+    ConditioningSharedLayout,
 };
 use crate::genotype::{
     sample_graph_current, shapeit_genotype_graph_prune_v1, shapeit_genotype_graph_store_v1,
@@ -21,7 +23,9 @@ use crate::genotype::{
 };
 use crate::ibd2::{Ibd2StatsV1, Ibd2TracksV1};
 use crate::pbwt::{
-    shapeit_pbwt_select_chunk_v1, shapeit_pbwt_select_sites_v1, shapeit_pbwt_transpose_neighbors_v1,
+    pbwt_select_chunk_prevalidated_v1, shapeit_pbwt_select_sites_v1,
+    shapeit_pbwt_transpose_neighbors_v1, validate_pbwt_select_job_v1, PbwtSelectJobLayout,
+    PbwtSelectJobV1,
 };
 
 #[cfg(target_arch = "x86_64")]
@@ -365,6 +369,7 @@ unsafe impl Sync for SharedCommonTemplate {}
 
 struct CommonIterationShared<'a> {
     template: SharedCommonTemplate,
+    conditioning_validation: ConditioningSharedLayout,
     graph_addresses: &'a [usize],
     haploid_individuals: &'a [u8],
     base_pair_positions: &'a [i32],
@@ -381,7 +386,8 @@ struct CommonIterationShared<'a> {
 
 struct CommonPbwtShared<'a> {
     parameters: &'a CommonPbwtSelectionV1,
-    chunk_starts: &'a [i32],
+    job: PbwtSelectJobV1,
+    validation: PbwtSelectJobLayout,
     next_chunk: AtomicUsize,
     completed_chunks: AtomicUsize,
     status: AtomicU32,
@@ -2341,7 +2347,15 @@ pub unsafe extern "C" fn shapeit_common_phase_job_run_v1(
     if parameters.is_null() || job.is_null() || result.is_null() {
         return STATUS_NULL_POINTER;
     }
-    let parameters = &*parameters;
+    common_phase_job_run(&*parameters, job, &mut *result, None)
+}
+
+unsafe fn common_phase_job_run(
+    parameters: &CommonPhaseJobV1,
+    job: *mut *mut ConditioningJobV1,
+    result: &mut HmmJobResultV1,
+    shared_validation: Option<&ConditioningSharedLayout>,
+) -> u32 {
     if parameters.abi_version != ABI_VERSION
         || parameters.struct_size < mem::size_of::<CommonPhaseJobV1>()
         || parameters.conditioning.graph.cast_mut() != parameters.phase.graph
@@ -2351,8 +2365,12 @@ pub unsafe extern "C" fn shapeit_common_phase_job_run_v1(
     {
         return STATUS_INVALID_DIMENSIONS;
     }
-    let conditioning_status =
-        shapeit_conditioning_graph_job_build_v1(&parameters.conditioning, job);
+    let conditioning_status = match shared_validation {
+        Some(validation) => {
+            conditioning_graph_job_build_prevalidated_v1(&parameters.conditioning, job, validation)
+        }
+        None => shapeit_conditioning_graph_job_build_v1(&parameters.conditioning, job),
+    };
     if conditioning_status != STATUS_OK {
         return conditioning_status;
     }
@@ -2399,10 +2417,11 @@ fn run_common_worker(worker: &mut CommonWorkerV1, shared: &CommonIterationShared
 
         let mut job_result = HmmJobResultV1::default();
         let status = unsafe {
-            shapeit_common_phase_job_run_v1(
+            common_phase_job_run(
                 &parameters,
                 &mut worker.conditioning_job,
                 &mut job_result,
+                Some(&shared.conditioning_validation),
             )
         };
         if status != STATUS_OK {
@@ -2623,8 +2642,21 @@ pub unsafe extern "C" fn shapeit_common_workers_run_iteration_v1(
         parameters.base_pair_positions,
         parameters.base_pair_positions_length,
     );
+    let mut effective_conditioning = parameters.sample_template.conditioning;
+    effective_conditioning.target_individual = 0;
+    effective_conditioning.target_individual_count = workers.graph_addresses.len();
+    effective_conditioning.haploid_individuals = workers.haploid_individuals.as_ptr();
+    effective_conditioning.haploid_individuals_length = workers.haploid_individuals.len();
+    let conditioning_validation = match validate_conditioning_graph_job_shared_v1(
+        &effective_conditioning,
+        workers.variant_count,
+    ) {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
     let shared = CommonIterationShared {
         template: SharedCommonTemplate(parameters.sample_template),
+        conditioning_validation,
         graph_addresses: &workers.graph_addresses,
         haploid_individuals: &workers.haploid_individuals,
         base_pair_positions,
@@ -2728,39 +2760,9 @@ fn run_pbwt_worker(shared: &CommonPbwtShared<'_>) {
         if chunk >= shared.parameters.chunk_count {
             break;
         }
-        let buffer_start = match usize::try_from(shared.chunk_starts[chunk]) {
-            Ok(value) => value,
-            Err(_) => {
-                record_pbwt_failure(shared, STATUS_OUT_OF_BOUNDS, chunk);
-                break;
-            }
-        };
         let parameters = shared.parameters;
-        let status = unsafe {
-            shapeit_pbwt_select_chunk_v1(
-                parameters.haplotypes,
-                parameters.haplotypes_length,
-                parameters.haplotype_stride,
-                parameters.site_count,
-                parameters.haplotype_count,
-                parameters.target_individual_count,
-                parameters.evaluated_sites,
-                parameters.evaluated_sites_length,
-                parameters.selected_sites,
-                parameters.selected_sites_length,
-                parameters.site_groups,
-                parameters.site_groups_length,
-                parameters.group_count,
-                parameters.site_chunks,
-                parameters.site_chunks_length,
-                chunk,
-                buffer_start,
-                parameters.depth,
-                parameters.ibd2_registry,
-                parameters.neighbors,
-                parameters.neighbors_length,
-            )
-        };
+        let status =
+            unsafe { pbwt_select_chunk_prevalidated_v1(&shared.job, &shared.validation, chunk) };
         if status != STATUS_OK {
             record_pbwt_failure(shared, status, chunk);
             break;
@@ -2817,6 +2819,33 @@ unsafe fn run_common_pbwt_selection(
     if chunk_starts.iter().any(|&start| start < 0) {
         return STATUS_OUT_OF_BOUNDS;
     }
+    let job = PbwtSelectJobV1 {
+        haplotypes: parameters.haplotypes,
+        haplotypes_length: parameters.haplotypes_length,
+        haplotype_stride: parameters.haplotype_stride,
+        site_count: parameters.site_count,
+        haplotype_count: parameters.haplotype_count,
+        target_individual_count: parameters.target_individual_count,
+        evaluated_sites: parameters.evaluated_sites,
+        evaluated_sites_length: parameters.evaluated_sites_length,
+        selected_sites: parameters.selected_sites,
+        selected_sites_length: parameters.selected_sites_length,
+        site_groups: parameters.site_groups,
+        site_groups_length: parameters.site_groups_length,
+        group_count: parameters.group_count,
+        site_chunks: parameters.site_chunks,
+        site_chunks_length: parameters.site_chunks_length,
+        chunk_starts: parameters.chunk_starts,
+        chunk_count: parameters.chunk_count,
+        depth: parameters.depth,
+        ibd2: parameters.ibd2_registry,
+        neighbors: parameters.neighbors,
+        neighbors_length: parameters.neighbors_length,
+    };
+    let validation = match validate_pbwt_select_job_v1(&job) {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
     let status = shapeit_pbwt_select_sites_v1(
         parameters.evaluated_sites,
         parameters.evaluated_sites_length,
@@ -2836,7 +2865,8 @@ unsafe fn run_common_pbwt_selection(
 
     let shared = CommonPbwtShared {
         parameters,
-        chunk_starts,
+        job,
+        validation,
         next_chunk: AtomicUsize::new(0),
         completed_chunks: AtomicUsize::new(0),
         status: AtomicU32::new(STATUS_OK),
@@ -3373,6 +3403,281 @@ mod tests {
         assert_eq!(double_graph_validation_scans(), 1);
 
         unsafe { crate::genotype::shapeit_genotype_graph_free_v1(graph) };
+    }
+
+    #[test]
+    fn common_workers_validate_conditioning_shared_arrays_once_per_iteration() {
+        let variants = [0u8];
+        let mut graph0 = ptr::null_mut();
+        let mut graph1 = ptr::null_mut();
+        for graph in [&mut graph0, &mut graph1] {
+            let status = unsafe {
+                crate::genotype::shapeit_genotype_graph_create_v1(
+                    variants.as_ptr(),
+                    variants.len(),
+                    1,
+                    graph,
+                )
+            };
+            assert_eq!(status, STATUS_OK);
+        }
+        let graphs = [graph0, graph1];
+        let haploid_individuals = [0u8; 2];
+        let mut workers = ptr::null_mut();
+        let status = unsafe {
+            shapeit_common_workers_create_v1(
+                1,
+                graphs.as_ptr(),
+                graphs.len(),
+                haploid_individuals.as_ptr(),
+                haploid_individuals.len(),
+                &mut workers,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+
+        let centimorgans_f64 = [0.0f64];
+        let centimorgans_f32 = [0.0f32];
+        let base_pair_positions = [1i32];
+        let mut selected_sites = [0u8];
+        let site_grouping = [0i32];
+        let pbwt_neighbors = [-1i32; 4];
+        let haplotypes = [0u8; 4];
+        let rare_alleles = [-1i8];
+        let mut registry = Ibd2TracksV1::new(2, &centimorgans_f32).unwrap();
+        let sample_template = CommonPhaseJobV1 {
+            abi_version: ABI_VERSION,
+            struct_size: mem::size_of::<CommonPhaseJobV1>(),
+            conditioning: ConditioningGraphBuildV1 {
+                abi_version: ABI_VERSION,
+                struct_size: mem::size_of::<ConditioningGraphBuildV1>(),
+                graph: ptr::null(),
+                centimorgans: centimorgans_f64.as_ptr(),
+                centimorgans_length: centimorgans_f64.len(),
+                minimum_window_centimorgans: 1.0,
+                selected_sites: selected_sites.as_ptr(),
+                selected_sites_length: selected_sites.len(),
+                site_grouping: site_grouping.as_ptr(),
+                site_grouping_length: site_grouping.len(),
+                pbwt_neighbors: pbwt_neighbors.as_ptr(),
+                pbwt_neighbors_length: pbwt_neighbors.len(),
+                pbwt_depth: 1,
+                pbwt_group_count: 1,
+                target_individual: 0,
+                target_individual_count: graphs.len(),
+                haplotype_count: haplotypes.len(),
+                haploid_individuals: ptr::null(),
+                haploid_individuals_length: 0,
+                haplotypes: haplotypes.as_ptr(),
+                haplotypes_length: haplotypes.len(),
+                haplotype_stride: 1,
+                maximum_heterozygote_mismatch: 0.75,
+                window_seed: 15_052_011,
+                window_domain: 2,
+                window_iteration: 3,
+                window_item: 0,
+                fallback_seed: 15_052_011,
+                fallback_domain: 8,
+                fallback_iteration: 3,
+                fallback_item: 0,
+            },
+            phase: HmmPhaseJobV1 {
+                abi_version: ABI_VERSION,
+                struct_size: mem::size_of::<HmmPhaseJobV1>() as u32,
+                graph: ptr::null_mut(),
+                conditioning_job: ptr::null_mut(),
+                haplotypes: haplotypes.as_ptr(),
+                haplotypes_length: haplotypes.len(),
+                haplotype_stride: 1,
+                centimorgans: centimorgans_f32.as_ptr(),
+                centimorgans_length: centimorgans_f32.len(),
+                recombination: ptr::null(),
+                recombination_length: 0,
+                rare_alleles: rare_alleles.as_ptr(),
+                rare_alleles_length: rare_alleles.len(),
+                effective_population_size: 15_000,
+                total_haplotypes: haplotypes.len() as i32,
+                emission_match: f64::from(0.9999f32),
+                emission_mismatch: f64::from(0.0001f32),
+                stage: STAGE_BURN,
+                prune_threshold: 0.999,
+                sample_seed: 15_052_011,
+                sample_domain: 2,
+                sample_iteration: 3,
+                sample_item: 0,
+            },
+        };
+        let iteration = CommonIterationV1 {
+            abi_version: ABI_VERSION,
+            struct_size: mem::size_of::<CommonIterationV1>(),
+            sample_template,
+            base_pair_positions: base_pair_positions.as_ptr(),
+            base_pair_positions_length: base_pair_positions.len(),
+            ibd2_registry: &mut registry,
+            progress: None,
+            progress_context: ptr::null_mut(),
+        };
+
+        crate::conditioning::reset_conditioning_shared_validation_scans();
+        for expected_scans in [1, 2] {
+            let mut result = CommonIterationResultV1::default();
+            let status = unsafe {
+                shapeit_common_workers_run_iteration_v1(workers, &iteration, &mut result)
+            };
+            assert_eq!(status, STATUS_OK);
+            assert_eq!(result.failed_sample, usize::MAX);
+            assert_eq!(
+                crate::conditioning::conditioning_shared_validation_scans(),
+                expected_scans
+            );
+        }
+
+        selected_sites[0] = 2;
+        assert_eq!(selected_sites[0], 2);
+        let mut rejected_result = CommonIterationResultV1::default();
+        let status = unsafe {
+            shapeit_common_workers_run_iteration_v1(workers, &iteration, &mut rejected_result)
+        };
+        assert_eq!(status, STATUS_INVALID_DIMENSIONS);
+        assert_eq!(
+            crate::conditioning::conditioning_shared_validation_scans(),
+            3
+        );
+
+        unsafe {
+            shapeit_common_workers_free_v1(workers);
+            crate::genotype::shapeit_genotype_graph_free_v1(graph0);
+            crate::genotype::shapeit_genotype_graph_free_v1(graph1);
+        }
+    }
+
+    #[test]
+    fn common_pbwt_validates_once_and_rejects_out_of_range_tail_before_writes() {
+        let haplotypes = [0x30u8, 0x50, 0xa0, 0xc0];
+        let evaluated_sites = [1u8; 4];
+        let mut selected_sites = [0u8; 4];
+        let site_groups = [0i32, 0, 1, 1];
+        let mut site_chunks = [0i32, 0, 1, 1];
+        let chunk_starts = [0i32, 0];
+        let mut ibd2 = Ibd2TracksV1::new(2, &[0.0, 1.0, 2.0, 3.0]).unwrap();
+        let mut neighbors = [-1i32; 16];
+        let parameters = CommonPbwtSelectionV1 {
+            abi_version: ABI_VERSION,
+            struct_size: mem::size_of::<CommonPbwtSelectionV1>(),
+            haplotypes: haplotypes.as_ptr(),
+            haplotypes_length: haplotypes.len(),
+            haplotype_stride: 1,
+            site_count: 4,
+            haplotype_count: 4,
+            target_individual_count: 2,
+            evaluated_sites: evaluated_sites.as_ptr(),
+            evaluated_sites_length: evaluated_sites.len(),
+            selected_sites: selected_sites.as_mut_ptr(),
+            selected_sites_length: selected_sites.len(),
+            site_groups: site_groups.as_ptr(),
+            site_groups_length: site_groups.len(),
+            group_count: 2,
+            site_chunks: site_chunks.as_ptr(),
+            site_chunks_length: site_chunks.len(),
+            chunk_starts: chunk_starts.as_ptr(),
+            chunk_count: chunk_starts.len(),
+            depth: 1,
+            ibd2_registry: &mut ibd2,
+            neighbors: neighbors.as_mut_ptr(),
+            neighbors_length: neighbors.len(),
+            seed: 15_052_011,
+            domain: 1,
+            iteration: 3,
+            progress: None,
+            progress_context: ptr::null_mut(),
+        };
+
+        let mut reference_selected = [0u8; 4];
+        let status = unsafe {
+            shapeit_pbwt_select_sites_v1(
+                evaluated_sites.as_ptr(),
+                evaluated_sites.len(),
+                site_groups.as_ptr(),
+                site_groups.len(),
+                2,
+                parameters.seed,
+                parameters.domain,
+                parameters.iteration,
+                reference_selected.as_mut_ptr(),
+                reference_selected.len(),
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        let mut reference_neighbors = [-1i32; 16];
+        for chunk in 0..2 {
+            let status = unsafe {
+                crate::pbwt::shapeit_pbwt_select_chunk_v1(
+                    haplotypes.as_ptr(),
+                    haplotypes.len(),
+                    1,
+                    4,
+                    4,
+                    2,
+                    evaluated_sites.as_ptr(),
+                    evaluated_sites.len(),
+                    reference_selected.as_ptr(),
+                    reference_selected.len(),
+                    site_groups.as_ptr(),
+                    site_groups.len(),
+                    2,
+                    site_chunks.as_ptr(),
+                    site_chunks.len(),
+                    chunk,
+                    chunk_starts[chunk] as usize,
+                    1,
+                    &ibd2,
+                    reference_neighbors.as_mut_ptr(),
+                    reference_neighbors.len(),
+                )
+            };
+            assert_eq!(status, STATUS_OK);
+        }
+        let status = unsafe {
+            shapeit_pbwt_transpose_neighbors_v1(
+                reference_neighbors.as_mut_ptr(),
+                reference_neighbors.len(),
+                4,
+                2,
+                1,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+
+        crate::pbwt::reset_pbwt_select_validation_scans();
+        let mut failed_chunk = usize::MAX;
+        let status = unsafe { run_common_pbwt_selection(1, &parameters, &mut failed_chunk) };
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(failed_chunk, usize::MAX);
+        assert_eq!(crate::pbwt::pbwt_select_validation_scans(), 1);
+        assert_eq!(selected_sites, reference_selected);
+        assert_eq!(neighbors, reference_neighbors);
+        let expected_selected = selected_sites;
+        let expected_neighbors = neighbors;
+
+        let status = unsafe { run_common_pbwt_selection(1, &parameters, &mut failed_chunk) };
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(selected_sites, expected_selected);
+        assert_eq!(neighbors, expected_neighbors);
+        assert_eq!(crate::pbwt::pbwt_select_validation_scans(), 2);
+
+        site_chunks[3] = 2;
+        assert_eq!(site_chunks[3], 2);
+        selected_sites.fill(0xa5);
+        neighbors.fill(77);
+        let selected_before = selected_sites;
+        let neighbors_before = neighbors;
+        failed_chunk = 123;
+        let status = unsafe { run_common_pbwt_selection(1, &parameters, &mut failed_chunk) };
+        assert_eq!(status, STATUS_INVALID_DIMENSIONS);
+        assert_eq!(selected_sites, selected_before);
+        assert_eq!(neighbors, neighbors_before);
+        assert_eq!(failed_chunk, 123);
+        assert_eq!(crate::pbwt::pbwt_select_validation_scans(), 3);
     }
 
     #[test]
