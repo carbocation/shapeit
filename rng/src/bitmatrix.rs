@@ -179,11 +179,13 @@ fn validate_het_overlap_layout(
 }
 
 #[inline]
+#[cfg(any(test, not(target_arch = "aarch64")))]
 fn multiply_high(lhs: u32, rhs: u32) -> u32 {
     ((u64::from(lhs) * u64::from(rhs)) >> 32) as u32
 }
 
 #[inline]
+#[cfg(any(test, not(target_arch = "aarch64")))]
 fn transpose_word_portable(packed: u64) -> [u8; 8] {
     let low = packed as u32;
     let high = (packed >> 32) as u32;
@@ -201,6 +203,7 @@ fn transpose_word_portable(packed: u64) -> [u8; 8] {
     transposed
 }
 
+#[cfg(any(test, not(target_arch = "aarch64")))]
 fn transpose_portable(source: &[u8], rows: &[u32], target: &mut [u8], layout: TransposeLayout) {
     for byte in 0..layout.source_byte_count {
         for row in (0..layout.row_count_padded).step_by(8) {
@@ -221,6 +224,7 @@ fn transpose_portable(source: &[u8], rows: &[u32], target: &mut [u8], layout: Tr
     }
 }
 
+#[cfg(any(test, not(target_arch = "aarch64")))]
 fn full_transpose_portable(source: &[u8], target: &mut [u8], layout: FullTransposeLayout) {
     for byte in 0..layout.max_cols >> 3 {
         for row in (0..layout.max_rows).step_by(8) {
@@ -231,6 +235,382 @@ fn full_transpose_portable(source: &[u8], target: &mut [u8], layout: FullTranspo
             }
             for (bit, value) in transpose_word_portable(packed).into_iter().enumerate() {
                 target[(byte * 8 + bit) * layout.target_stride + (row >> 3)] = value;
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn transpose_word_aarch64(mut packed: u64) -> u64 {
+    // Transpose an 8-by-8 bit matrix in three SWAR butterfly stages. `packed`
+    // contains the first source row in its most-significant byte, and the
+    // result contains the first source bit in its most-significant byte. This
+    // is exactly the byte and bit ordering used by the portable and BMI2
+    // implementations.
+    let mut swap = (packed ^ (packed >> 7)) & 0x00aa_00aa_00aa_00aa;
+    packed ^= swap ^ (swap << 7);
+    swap = (packed ^ (packed >> 14)) & 0x0000_cccc_0000_cccc;
+    packed ^= swap ^ (swap << 14);
+    swap = (packed ^ (packed >> 28)) & 0x0000_0000_f0f0_f0f0;
+    packed ^ swap ^ (swap << 28)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn transpose_word_pair_aarch64(
+    mut packed: core::arch::aarch64::uint64x2_t,
+) -> core::arch::aarch64::uint64x2_t {
+    use core::arch::aarch64::{vandq_u64, vdupq_n_u64, veorq_u64, vshlq_n_u64, vshrq_n_u64};
+
+    let mut swap = vandq_u64(
+        veorq_u64(packed, vshrq_n_u64::<7>(packed)),
+        vdupq_n_u64(0x00aa_00aa_00aa_00aa),
+    );
+    packed = veorq_u64(veorq_u64(packed, swap), vshlq_n_u64::<7>(swap));
+    swap = vandq_u64(
+        veorq_u64(packed, vshrq_n_u64::<14>(packed)),
+        vdupq_n_u64(0x0000_cccc_0000_cccc),
+    );
+    packed = veorq_u64(veorq_u64(packed, swap), vshlq_n_u64::<14>(swap));
+    swap = vandq_u64(
+        veorq_u64(packed, vshrq_n_u64::<28>(packed)),
+        vdupq_n_u64(0x0000_0000_f0f0_f0f0),
+    );
+    veorq_u64(veorq_u64(packed, swap), vshlq_n_u64::<28>(swap))
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn transpose_byte_tile_aarch64(source: *const u8, offsets: [usize; 8]) -> [u64; 8] {
+    use core::arch::aarch64::{
+        uint8x8_t, vcombine_u64, vgetq_lane_u64, vld1_u8, vreinterpret_u16_u8,
+        vreinterpret_u32_u16, vreinterpret_u64_u8, vreinterpret_u8_u32, vrev64_u8, vtrn1_u16,
+        vtrn1_u32, vtrn1_u8, vtrn2_u16, vtrn2_u32, vtrn2_u8,
+    };
+
+    // First transpose the eight contiguous source-byte vectors. Each resulting
+    // vector contains one byte position gathered from all eight rows, which is
+    // then bit-transposed by the shared SWAR core below.
+    let rows = [
+        vld1_u8(source.add(offsets[0])),
+        vld1_u8(source.add(offsets[1])),
+        vld1_u8(source.add(offsets[2])),
+        vld1_u8(source.add(offsets[3])),
+        vld1_u8(source.add(offsets[4])),
+        vld1_u8(source.add(offsets[5])),
+        vld1_u8(source.add(offsets[6])),
+        vld1_u8(source.add(offsets[7])),
+    ];
+
+    let bytes = [
+        vtrn1_u8(rows[0], rows[1]),
+        vtrn2_u8(rows[0], rows[1]),
+        vtrn1_u8(rows[2], rows[3]),
+        vtrn2_u8(rows[2], rows[3]),
+        vtrn1_u8(rows[4], rows[5]),
+        vtrn2_u8(rows[4], rows[5]),
+        vtrn1_u8(rows[6], rows[7]),
+        vtrn2_u8(rows[6], rows[7]),
+    ];
+    let halfwords = [
+        vtrn1_u16(vreinterpret_u16_u8(bytes[0]), vreinterpret_u16_u8(bytes[2])),
+        vtrn2_u16(vreinterpret_u16_u8(bytes[0]), vreinterpret_u16_u8(bytes[2])),
+        vtrn1_u16(vreinterpret_u16_u8(bytes[1]), vreinterpret_u16_u8(bytes[3])),
+        vtrn2_u16(vreinterpret_u16_u8(bytes[1]), vreinterpret_u16_u8(bytes[3])),
+        vtrn1_u16(vreinterpret_u16_u8(bytes[4]), vreinterpret_u16_u8(bytes[6])),
+        vtrn2_u16(vreinterpret_u16_u8(bytes[4]), vreinterpret_u16_u8(bytes[6])),
+        vtrn1_u16(vreinterpret_u16_u8(bytes[5]), vreinterpret_u16_u8(bytes[7])),
+        vtrn2_u16(vreinterpret_u16_u8(bytes[5]), vreinterpret_u16_u8(bytes[7])),
+    ];
+    let words = [
+        vtrn1_u32(
+            vreinterpret_u32_u16(halfwords[0]),
+            vreinterpret_u32_u16(halfwords[4]),
+        ),
+        vtrn1_u32(
+            vreinterpret_u32_u16(halfwords[2]),
+            vreinterpret_u32_u16(halfwords[6]),
+        ),
+        vtrn1_u32(
+            vreinterpret_u32_u16(halfwords[1]),
+            vreinterpret_u32_u16(halfwords[5]),
+        ),
+        vtrn1_u32(
+            vreinterpret_u32_u16(halfwords[3]),
+            vreinterpret_u32_u16(halfwords[7]),
+        ),
+        vtrn2_u32(
+            vreinterpret_u32_u16(halfwords[0]),
+            vreinterpret_u32_u16(halfwords[4]),
+        ),
+        vtrn2_u32(
+            vreinterpret_u32_u16(halfwords[2]),
+            vreinterpret_u32_u16(halfwords[6]),
+        ),
+        vtrn2_u32(
+            vreinterpret_u32_u16(halfwords[1]),
+            vreinterpret_u32_u16(halfwords[5]),
+        ),
+        vtrn2_u32(
+            vreinterpret_u32_u16(halfwords[3]),
+            vreinterpret_u32_u16(halfwords[7]),
+        ),
+    ];
+
+    let pack = |word| {
+        let bytes: uint8x8_t = vreinterpret_u8_u32(word);
+        vreinterpret_u64_u8(vrev64_u8(bytes))
+    };
+    let pairs = [
+        transpose_word_pair_aarch64(vcombine_u64(pack(words[0]), pack(words[1]))),
+        transpose_word_pair_aarch64(vcombine_u64(pack(words[2]), pack(words[3]))),
+        transpose_word_pair_aarch64(vcombine_u64(pack(words[4]), pack(words[5]))),
+        transpose_word_pair_aarch64(vcombine_u64(pack(words[6]), pack(words[7]))),
+    ];
+    [
+        vgetq_lane_u64::<0>(pairs[0]),
+        vgetq_lane_u64::<1>(pairs[0]),
+        vgetq_lane_u64::<0>(pairs[1]),
+        vgetq_lane_u64::<1>(pairs[1]),
+        vgetq_lane_u64::<0>(pairs[2]),
+        vgetq_lane_u64::<1>(pairs[2]),
+        vgetq_lane_u64::<0>(pairs[3]),
+        vgetq_lane_u64::<1>(pairs[3]),
+    ]
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn store_transposed_word_aarch64(
+    target: *mut u8,
+    packed: u64,
+    source_byte: usize,
+    target_byte: usize,
+    target_stride: usize,
+) {
+    for bit in 0..8 {
+        target
+            .add((source_byte * 8 + bit) * target_stride + target_byte)
+            .write((packed >> ((7 - bit) * 8)) as u8);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn store_transposed_word_pair_aarch64(
+    target: *mut u8,
+    packed0: u64,
+    packed1: u64,
+    source_byte: usize,
+    target_byte: usize,
+    target_stride: usize,
+) {
+    for bit in 0..8 {
+        let values = [
+            (packed0 >> ((7 - bit) * 8)) as u8,
+            (packed1 >> ((7 - bit) * 8)) as u8,
+        ];
+        target
+            .add((source_byte * 8 + bit) * target_stride + target_byte)
+            .cast::<u16>()
+            .write_unaligned(u16::from_ne_bytes(values));
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn transpose_aarch64(
+    source: &[u8],
+    rows: &[u32],
+    target: &mut [u8],
+    layout: TransposeLayout,
+) {
+    let source = source.as_ptr();
+    let target = target.as_mut_ptr();
+    let full_rows = rows.len() & !7;
+    let full_bytes = layout.source_byte_count & !7;
+
+    // Match the x86 cache-blocking shape: for each 64 selected rows, visit a
+    // compact eight-byte source span and its 64 target rows before advancing.
+    // Adjacent eight-row groups are stored as native-endian u16 pairs, making
+    // the target writes contiguous even though the selected source rows are a
+    // gather.
+    for row_block in (0..full_rows).step_by(64) {
+        let row_stop = row_block + core::cmp::min(64, full_rows - row_block);
+        for byte_block in (0..full_bytes).step_by(8) {
+            for row in (row_block..row_stop).step_by(16) {
+                let offsets0 = core::array::from_fn(|lane| {
+                    *rows.get_unchecked(row + lane) as usize * layout.source_stride
+                        + layout.source_byte_first
+                        + byte_block
+                });
+                let packed0 = transpose_byte_tile_aarch64(source, offsets0);
+                if row_stop - row >= 16 {
+                    let offsets1 = core::array::from_fn(|lane| {
+                        *rows.get_unchecked(row + 8 + lane) as usize * layout.source_stride
+                            + layout.source_byte_first
+                            + byte_block
+                    });
+                    let packed1 = transpose_byte_tile_aarch64(source, offsets1);
+                    for byte in 0..8 {
+                        store_transposed_word_pair_aarch64(
+                            target,
+                            packed0[byte],
+                            packed1[byte],
+                            byte_block + byte,
+                            row >> 3,
+                            layout.target_stride,
+                        );
+                    }
+                } else {
+                    for (byte, packed) in packed0.into_iter().enumerate() {
+                        store_transposed_word_aarch64(
+                            target,
+                            packed,
+                            byte_block + byte,
+                            row >> 3,
+                            layout.target_stride,
+                        );
+                    }
+                }
+            }
+        }
+        for byte in full_bytes..layout.source_byte_count {
+            for row in (row_block..row_stop).step_by(16) {
+                let mut packed0 = 0u64;
+                for lane in 0..8 {
+                    let source_row = *rows.get_unchecked(row + lane) as usize;
+                    let value = *source
+                        .add(source_row * layout.source_stride + layout.source_byte_first + byte);
+                    packed0 |= u64::from(value) << ((7 - lane) * 8);
+                }
+                let packed0 = transpose_word_aarch64(packed0);
+                if row_stop - row >= 16 {
+                    let mut packed1 = 0u64;
+                    for lane in 0..8 {
+                        let source_row = *rows.get_unchecked(row + 8 + lane) as usize;
+                        let value = *source.add(
+                            source_row * layout.source_stride + layout.source_byte_first + byte,
+                        );
+                        packed1 |= u64::from(value) << ((7 - lane) * 8);
+                    }
+                    store_transposed_word_pair_aarch64(
+                        target,
+                        packed0,
+                        transpose_word_aarch64(packed1),
+                        byte,
+                        row >> 3,
+                        layout.target_stride,
+                    );
+                } else {
+                    store_transposed_word_aarch64(
+                        target,
+                        packed0,
+                        byte,
+                        row >> 3,
+                        layout.target_stride,
+                    );
+                }
+            }
+        }
+    }
+
+    if full_rows < rows.len() {
+        let row = full_rows;
+        for byte in 0..layout.source_byte_count {
+            let mut packed = 0u64;
+            for lane in 0..rows.len() - full_rows {
+                let source_row = *rows.get_unchecked(row + lane) as usize;
+                let value = *source
+                    .add(source_row * layout.source_stride + layout.source_byte_first + byte);
+                packed |= u64::from(value) << ((7 - lane) * 8);
+            }
+            store_transposed_word_aarch64(
+                target,
+                transpose_word_aarch64(packed),
+                byte,
+                row >> 3,
+                layout.target_stride,
+            );
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn full_transpose_aarch64(source: &[u8], target: &mut [u8], layout: FullTransposeLayout) {
+    let source = source.as_ptr();
+    let target = target.as_mut_ptr();
+    let source_byte_count = layout.max_cols >> 3;
+    let full_bytes = source_byte_count & !7;
+
+    for row_block in (0..layout.max_rows).step_by(64) {
+        let row_stop = row_block + core::cmp::min(64, layout.max_rows - row_block);
+        for byte_block in (0..full_bytes).step_by(8) {
+            for row in (row_block..row_stop).step_by(16) {
+                let offsets0 =
+                    core::array::from_fn(|lane| (row + lane) * layout.source_stride + byte_block);
+                let packed0 = transpose_byte_tile_aarch64(source, offsets0);
+                if row_stop - row >= 16 {
+                    let offsets1 = core::array::from_fn(|lane| {
+                        (row + 8 + lane) * layout.source_stride + byte_block
+                    });
+                    let packed1 = transpose_byte_tile_aarch64(source, offsets1);
+                    for byte in 0..8 {
+                        store_transposed_word_pair_aarch64(
+                            target,
+                            packed0[byte],
+                            packed1[byte],
+                            byte_block + byte,
+                            row >> 3,
+                            layout.target_stride,
+                        );
+                    }
+                } else {
+                    for (byte, packed) in packed0.into_iter().enumerate() {
+                        store_transposed_word_aarch64(
+                            target,
+                            packed,
+                            byte_block + byte,
+                            row >> 3,
+                            layout.target_stride,
+                        );
+                    }
+                }
+            }
+        }
+        for byte in full_bytes..source_byte_count {
+            for row in (row_block..row_stop).step_by(16) {
+                let mut packed0 = 0u64;
+                for lane in 0..8 {
+                    let value = *source.add((row + lane) * layout.source_stride + byte);
+                    packed0 |= u64::from(value) << ((7 - lane) * 8);
+                }
+                let packed0 = transpose_word_aarch64(packed0);
+                if row_stop - row >= 16 {
+                    let mut packed1 = 0u64;
+                    for lane in 0..8 {
+                        let value = *source.add((row + 8 + lane) * layout.source_stride + byte);
+                        packed1 |= u64::from(value) << ((7 - lane) * 8);
+                    }
+                    store_transposed_word_pair_aarch64(
+                        target,
+                        packed0,
+                        transpose_word_aarch64(packed1),
+                        byte,
+                        row >> 3,
+                        layout.target_stride,
+                    );
+                } else {
+                    store_transposed_word_aarch64(
+                        target,
+                        packed0,
+                        byte,
+                        row >> 3,
+                        layout.target_stride,
+                    );
+                }
             }
         }
     }
@@ -323,6 +703,15 @@ fn subset_transpose(source: &[u8], rows: &[u32], target: &mut [u8], layout: Tran
         }
         return;
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: Advanced SIMD is part of the AArch64 execution environment,
+        // and the caller has validated every source and target bound.
+        unsafe {
+            transpose_aarch64(source, rows, target, layout);
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     transpose_portable(source, rows, target, layout);
 }
 
@@ -336,6 +725,15 @@ fn full_transpose(source: &[u8], target: &mut [u8], layout: FullTransposeLayout)
         }
         return;
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: Advanced SIMD is part of the AArch64 execution environment,
+        // and the caller has validated every source and target bound.
+        unsafe {
+            full_transpose_aarch64(source, target, layout);
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     full_transpose_portable(source, target, layout);
 }
 
@@ -687,18 +1085,16 @@ mod tests {
         let row_count_padded = padded_rows(rows.len()).unwrap();
         let target_stride = row_count_padded >> 3;
         let mut target = vec![0u8; source_byte_count * 8 * target_stride];
-        transpose_portable(
-            source,
-            rows,
-            &mut target,
-            TransposeLayout {
-                source_stride,
-                row_count_padded,
-                source_byte_first,
-                source_byte_count,
-                target_stride,
-            },
-        );
+        for byte in 0..source_byte_count {
+            for bit in 0..8 {
+                for (target_row, &source_row) in rows.iter().enumerate() {
+                    let source_value =
+                        source[source_row as usize * source_stride + source_byte_first + byte];
+                    target[(byte * 8 + bit) * target_stride + (target_row >> 3)] |=
+                        ((source_value >> (7 - bit)) & 1) << (7 - (target_row & 7));
+                }
+            }
+        }
         target
     }
 
@@ -850,65 +1246,168 @@ mod tests {
 
     #[test]
     fn subset_transpose_matches_reference_across_boundaries() {
-        const SOURCE_ROWS: usize = 137;
-        const SOURCE_STRIDE: usize = 19;
-        let source: Vec<u8> = (0..SOURCE_ROWS * SOURCE_STRIDE)
-            .map(|index| (index as u8).wrapping_mul(73).wrapping_add(41))
-            .collect();
+        const SOURCE_ROWS: usize = 173;
+        const SOURCE_STRIDE: usize = 37;
+        let mut source_storage = vec![0u8; SOURCE_ROWS * SOURCE_STRIDE + 2];
+        for (index, value) in source_storage[1..=SOURCE_ROWS * SOURCE_STRIDE]
+            .iter_mut()
+            .enumerate()
+        {
+            *value = (index as u8).wrapping_mul(73).wrapping_add(41);
+        }
+        let source = &source_storage[1..=SOURCE_ROWS * SOURCE_STRIDE];
 
-        for row_count in [1usize, 7, 8, 9, 63, 64, 65, 129] {
-            let rows: Vec<u32> = (0..row_count)
-                .map(|index| ((index * 37 + 11) % SOURCE_ROWS) as u32)
+        for row_count in [
+            1usize, 2, 7, 8, 9, 15, 16, 17, 63, 64, 65, 127, 128, 129, 257,
+        ] {
+            let mut rows: Vec<u32> = (0..row_count)
+                .map(|index| {
+                    if index % 11 == 0 {
+                        7
+                    } else {
+                        ((index * 37 + 11) % SOURCE_ROWS) as u32
+                    }
+                })
                 .collect();
-            for (source_byte_first, source_byte_count) in [(0, 1), (1, 8), (7, 12)] {
+            if row_count & 1 == 0 {
+                rows.reverse();
+            }
+            for (source_byte_first, source_byte_count) in [
+                (0, 1),
+                (1, 2),
+                (2, 7),
+                (3, 8),
+                (4, 9),
+                (5, 15),
+                (6, 16),
+                (7, 17),
+                (6, 31),
+                (SOURCE_STRIDE - 1, 1),
+            ] {
                 let expected = reference(
-                    &source,
+                    source,
                     SOURCE_STRIDE,
                     &rows,
                     source_byte_first,
                     source_byte_count,
                 );
                 let target_stride = padded_rows(rows.len()).unwrap() >> 3;
-                let mut actual = vec![0xa5; expected.len()];
-                subset_transpose(
-                    &source,
-                    &rows,
-                    &mut actual,
-                    TransposeLayout {
-                        source_stride: SOURCE_STRIDE,
-                        row_count_padded: padded_rows(rows.len()).unwrap(),
-                        source_byte_first,
-                        source_byte_count,
-                        target_stride,
-                    },
-                );
+                let layout = TransposeLayout {
+                    source_stride: SOURCE_STRIDE,
+                    row_count_padded: padded_rows(rows.len()).unwrap(),
+                    source_byte_first,
+                    source_byte_count,
+                    target_stride,
+                };
+                let mut portable = vec![0xa5; expected.len()];
+                transpose_portable(source, &rows, &mut portable, layout);
+                assert_eq!(portable, expected);
+
+                let mut actual_storage = vec![0xa5; expected.len() + 2];
+                let actual = &mut actual_storage[1..=expected.len()];
+                subset_transpose(source, &rows, actual, layout);
                 assert_eq!(actual, expected);
+
+                let used_lanes = row_count & 7;
+                if used_lanes != 0 {
+                    let padding_mask = (1u8 << (8 - used_lanes)) - 1;
+                    for target_row in 0..source_byte_count * 8 {
+                        assert_eq!(
+                            actual[target_row * target_stride + target_stride - 1] & padding_mask,
+                            0
+                        );
+                    }
+                }
+                assert_eq!(actual_storage[0], 0xa5);
+                assert_eq!(actual_storage[expected.len() + 1], 0xa5);
             }
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn aarch64_swar_core_matches_portable_for_every_lane_byte() {
+        // A bit transpose is linear. Exhausting all 256 values independently
+        // in every input lane therefore covers every input bit and all
+        // within-lane combinations without enumerating 2^64 words.
+        for lane in 0..8 {
+            for value in 0u64..=u8::MAX.into() {
+                let packed = value << ((7 - lane) * 8);
+                assert_eq!(
+                    transpose_word_aarch64(packed).to_be_bytes(),
+                    transpose_word_portable(packed)
+                );
+            }
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn aarch64_neon_byte_tile_matches_portable_columns() {
+        const STRIDE: usize = 13;
+        let mut source = vec![0u8; 1 + 8 * STRIDE];
+        for row in 0..8 {
+            for byte in 0..8 {
+                source[1 + row * STRIDE + byte] = (row as u8)
+                    .wrapping_mul(53)
+                    .wrapping_add((byte as u8).wrapping_mul(97))
+                    .wrapping_add(19);
+            }
+        }
+        let offsets = core::array::from_fn(|row| 1 + row * STRIDE);
+        let actual = unsafe { transpose_byte_tile_aarch64(source.as_ptr(), offsets) };
+        for byte in 0..8 {
+            let mut packed = 0u64;
+            for row in 0..8 {
+                packed |= u64::from(source[1 + row * STRIDE + byte]) << ((7 - row) * 8);
+            }
+            assert_eq!(
+                actual[byte],
+                u64::from_be_bytes(transpose_word_portable(packed))
+            );
         }
     }
 
     #[test]
     fn full_transpose_matches_independent_reference_and_preserves_remainder() {
-        for (source_rows, source_stride, max_rows, max_cols) in [
-            (8, 1, 8, 8),
-            (16, 3, 8, 16),
-            (72, 9, 64, 56),
-            (72, 9, 72, 72),
+        for (source_rows, source_stride, max_rows, max_cols, target_padding) in [
+            (8, 1, 8, 8, 0),
+            (24, 3, 16, 16, 2),
+            (72, 9, 64, 56, 1),
+            (72, 9, 72, 72, 3),
+            (136, 17, 128, 120, 1),
+            (136, 17, 136, 128, 2),
         ] {
-            let source: Vec<u8> = (0..source_rows * source_stride)
-                .map(|index| (index as u8).wrapping_mul(73).wrapping_add(41))
-                .collect();
-            let target_stride = source_rows >> 3;
-            let target_length = source_stride * 8 * target_stride;
+            let mut source_storage = vec![0u8; source_rows * source_stride + 2];
+            for (index, value) in source_storage[1..=source_rows * source_stride]
+                .iter_mut()
+                .enumerate()
+            {
+                *value = (index as u8).wrapping_mul(73).wrapping_add(41);
+            }
+            let source = &source_storage[1..=source_rows * source_stride];
+            let target_stride = (max_rows >> 3) + target_padding;
+            let target_length = max_cols * target_stride + 5;
             let expected = reference_full(
-                &source,
+                source,
                 source_stride,
                 max_rows,
                 max_cols,
                 target_stride,
                 target_length,
             );
-            let mut actual = vec![0xa5; target_length];
+            let layout = FullTransposeLayout {
+                source_stride,
+                max_rows,
+                max_cols,
+                target_stride,
+            };
+            let mut portable = vec![0xa5; target_length];
+            full_transpose_portable(source, &mut portable, layout);
+            assert_eq!(portable, expected);
+
+            let mut actual_storage = vec![0xa5; target_length + 2];
+            let actual = &mut actual_storage[1..=target_length];
             let status = unsafe {
                 shapeit_bitmatrix_transpose_v1(
                     source.as_ptr(),
@@ -924,6 +1423,8 @@ mod tests {
             };
             assert_eq!(status, STATUS_OK);
             assert_eq!(actual, expected);
+            assert_eq!(actual_storage[0], 0xa5);
+            assert_eq!(actual_storage[target_length + 1], 0xa5);
         }
     }
 
@@ -1024,6 +1525,41 @@ mod tests {
             validate_layout(32, 8, &rows, 0, 2, 16, 2),
             Err(STATUS_INVALID_DIMENSIONS)
         );
+    }
+
+    #[test]
+    fn empty_subset_preserves_public_zero_row_contract() {
+        let status = unsafe {
+            shapeit_bitmatrix_subset_transpose_v1(
+                core::ptr::null(),
+                0,
+                0,
+                core::ptr::null(),
+                0,
+                0,
+                1,
+                core::ptr::null_mut(),
+                0,
+                0,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+
+        let status = unsafe {
+            shapeit_bitmatrix_subset_transpose_v1(
+                core::ptr::null(),
+                0,
+                0,
+                core::ptr::null(),
+                0,
+                0,
+                0,
+                core::ptr::null_mut(),
+                0,
+                0,
+            )
+        };
+        assert_eq!(status, STATUS_INVALID_DIMENSIONS);
     }
 
     #[test]
